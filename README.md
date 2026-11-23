@@ -49,10 +49,11 @@ Delivery is generic, in this order:
 1. the focused editable field,
 2. otherwise the first editable field in the window,
 3. otherwise a Leanback search box: a node whose class contains `StreamingTextView`/`SearchEditText`, or whose id looks like a search field (`lb_search_text_editor`, `search_text`, `search_box`, …),
-4. otherwise the first node whose text or content description mentions "Search" (clicked, then retried — this is what opens the search screen in SmartTube, TizenTube and most Leanback apps),
-5. otherwise it gives up quietly — nothing is typed and the app is left untouched.
+4. otherwise the first node whose text or content description mentions "Search" (clicked, then retried — this is what opens the search screen in SmartTube and most Leanback apps),
+5. otherwise a search-URL fallback: open the app's own search results with an `ACTION_VIEW` deep link (`https://www.youtube.com/results?search_query=…` for YouTube/Cobalt builds, `https://app.primevideo.com/search?phrase=…` for Prime Video, a Google search for supported browsers),
+6. otherwise it gives up quietly — nothing is typed and the app is left untouched.
 
-Leanback apps such as SmartTube and TizenTube have no editable field at all: their search box is a `StreamingTextView`, so it is filled with `ACTION_SET_TEXT` directly. Browsers such as TV Bro get an extra click + focus + retry because their WebView text field often rejects the first `ACTION_SET_TEXT`.
+Leanback apps such as SmartTube have no editable field at all: their search box is a `StreamingTextView`, so it is filled with `ACTION_SET_TEXT` directly. Browsers such as TV Bro get an extra click + focus + retry because their WebView text field often rejects the first `ACTION_SET_TEXT`. Cobalt builds such as TizenTube and Amazon Ignition (Prime Video) expose an almost empty accessibility tree, so after the field attempts fail their own link handler is used instead.
 
 The same APK registers a handler for `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`, so apps that ship their own mic button can launch a working recogniser.
 
@@ -60,10 +61,12 @@ The same APK registers a handler for `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`,
 
 Routing is **global with a blocklist**. These keep their stock Jio behaviour and are never touched:
 
-- the Jio/preset apps (JioTV+, Hotstar, Netflix, Prime Video, `com.jio.yt`, Zee5, SonyLIV, Sun NXT, Hoichoi, EPIC ON, Ultra Jhakaas, ETV Win, and everything under `com.jio.*`, `com.jiostb.*`, `com.jiotv.*`, `com.iwedia.*`),
+- the Jio/preset apps (JioTV+, Hotstar, Netflix, `com.jio.yt`, Zee5, SonyLIV, Sun NXT, Hoichoi, EPIC ON, Ultra Jhakaas, ETV Win, and everything under `com.jio.*`, `com.jiostb.*`, `com.jiotv.*`, `com.iwedia.*`),
 - Settings, SystemUI, `android`, the Jio voice app, the current launcher and MicBridge itself.
 
-Everything else gets the generic flow — **including apps that the Jio launcher has added to `Settings.Global remote_app_list`** (TVExplorer, Shevery, a sideloaded TizenTube, …). Version 1.0 blocked every package in that list, which silently disabled MicBridge for sideloaded apps pinned to the Jio home screen; 1.1 uses the explicit list above instead.
+**TizenTube** and **Prime Video** are handled through their own search deep links because neither exposes a usable accessibility tree. Prime Video restarts its profile picker before showing the results, so one extra "who's watching?" selection is expected per search.
+
+Everything else gets the generic flow — **including apps that the Jio launcher has added to `Settings.Global remote_app_list`** (TVExplorer, Shevery, a sideloaded TizenTube, …). Version 1.0 blocked every package in that list, which silently disabled MicBridge for sideloaded apps pinned to the Jio home screen; 1.1 and later use the explicit list above instead.
 
 ## Requirements
 
@@ -118,6 +121,8 @@ The service also starts on its own after a reboot, as long as it stays in `enabl
 Press the mic key and speak. The Jio overlay appears for ~2–4 seconds (the firmware always starts it; hiding it would need root), then closes and the text lands in the app.
 
 - **SmartTube:** press mic anywhere, or press its own search orb.
+- **TizenTube:** press mic anywhere; the app opens its search results for what you said.
+- **Prime Video:** press mic on any screen; pick a profile if Prime asks, then the results open.
 - **Nuvio and other apps:** open the app's search screen first if it does not expose a search entry point on the current screen.
 
 ### Injecting a query without speaking
@@ -146,7 +151,7 @@ deliverToApp try=0 top=org.smarttube.stable target=org.smarttube.stable
 typed into org.smarttube.stable (StreamingTextView#lb_search_text_editor): hello
 ```
 
-If the second line says `-> blocked`, the app is on the blocklist (use `micbridge_allow`). If the last line says `no text field in <pkg>`, the app needs its search screen opened first.
+If the second line says `-> blocked`, the app is on the blocklist (use `micbridge_allow`). If the last line says `search via url in <pkg>`, the app had no text field and its search deep link was opened. If it says `no text field in <pkg>` and no `search via url` line follows, the app has neither a field nor a known search URL; add one with `micbridge_search` (see below).
 
 The same log is appended to `/sdcard/Android/data/dev.dedsec.micbridge/files/micbridge.log`.
 
@@ -203,6 +208,22 @@ The setting is read live; no restart is needed. Clear it with:
 adb shell settings delete global micbridge_allow
 ```
 
+`micbridge_block` forces specific packages back to the stock behaviour, even if they would normally be routed (same syntax, read live):
+
+```bash
+adb shell settings put global micbridge_block "com.example.app,com.other.*"
+adb shell settings delete global micbridge_block
+```
+
+`micbridge_search` adds search-URL templates for apps that expose no text field and are not recognised automatically. Entries are separated by `;` or newlines; `%s` is replaced with the URL-encoded query:
+
+```bash
+adb shell settings put global micbridge_search "com.example.app=https://example.com/search?q=%s"
+adb shell settings delete global micbridge_search
+```
+
+Templates are tried after field delivery has failed. A template is only used if the app actually handles the link.
+
 To change the built-in list instead, edit `MicA11yService.java`:
 
 ```java
@@ -216,9 +237,11 @@ then rebuild and reinstall.
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Nothing is typed, log ends with `no text field in <pkg>; nothing typed` | The app has no text field and no visible "Search" entry point. Open its search screen first. |
+| Nothing is typed, log ends with `no text field in <pkg>; nothing typed` and no `search via url` line | The app has no text field, no visible "Search" entry point and no known search URL. Open its search screen first, or add a `micbridge_search` template. |
+| App opens its own search screen instead of filling a box | Expected for apps with no accessible text field (TizenTube, Prime Video). The search deep link is used because there is nothing to type into. |
+| Prime Video asks "who's watching?" after a voice search | Prime restarts its profile flow when a search link arrives. Pick a profile and the results open. |
 | The mic still opens Jio's universal search, log says `voice overlay over <pkg> -> blocked` | The app is on the built-in Jio/preset/launcher blocklist. Add it to `micbridge_allow` (see above). |
-| The mic still opens Jio's universal search and the log shows nothing after `service connected` | 1.0 logged no routing decisions. Upgrade to 1.1, which logs `blocked` vs `capturing` for every press. |
+| The mic still opens Jio's universal search and the log shows nothing after `service connected` | 1.0 logged no routing decisions. Upgrade to 1.2, which logs `blocked` vs `capturing` for every press. |
 | Nothing happens at all | The accessibility service is not enabled/bound. Re-run the enable steps and check `adb logcat -s MicBridge`. |
 | Service disappears after a reboot | Ensure it is listed in `enabled_accessibility_services`; toggling `accessibility_enabled` off/on also rebinds it. |
 | Wrong app receives the text | `lastApp` was stale. Press mic while the target app is in the foreground. |

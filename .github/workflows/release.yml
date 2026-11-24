@@ -36,21 +36,24 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
+      # The Ubuntu runner images already ship the Android SDK; only the two
+      # packages build.sh needs are missing. (android-actions/setup-android
+      # currently fails because it installs the removed "tools" package.)
       - name: Install build-tools and platform
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager --install "platforms;android-30" "build-tools;30.0.3" > /dev/null
+          sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          echo "SDK_DIR=$sdk" >> "$GITHUB_ENV"
+          sdkmanager_bin=$(command -v sdkmanager || ls -d "$sdk"/cmdline-tools/*/bin/sdkmanager | head -1)
+          yes | "$sdkmanager_bin" --licenses > /dev/null || true
+          "$sdkmanager_bin" --install "platforms;android-30" "build-tools;30.0.3" > /dev/null
 
       - name: Build
-        run: SDK="$ANDROID_SDK_ROOT" ./build.sh
+        run: SDK="$SDK_DIR" ./build.sh
 
       - name: Check tag matches the APK
         run: |
           tag=$(basename "$RELEASE_TAG")
-          aapt2="$ANDROID_SDK_ROOT/build-tools/30.0.3/aapt2"
+          aapt2="$SDK_DIR/build-tools/30.0.3/aapt2"
           version=$("$aapt2" dump badging micbridge.apk | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
           echo "tag=$tag apk=$version"
           test "v$version" = "$tag"

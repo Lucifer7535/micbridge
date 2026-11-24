@@ -171,6 +171,8 @@ export SDK=/path/to/android-sdk      # must contain build-tools/30.0.3 and platf
 ./build.sh                            # -> micbridge.apk
 ```
 
+Releases are built by GitHub Actions: pushing a `v*` tag (`.github/workflows/release.yml`) runs the same `build.sh` on the runner's Android SDK, checks that the tag matches the manifest's `versionName`, and publishes `micbridge.apk` as a release asset. The workflow can also be started manually with an existing tag.
+
 The APK is signed with the bundled `micbridge.keystore` (alias `micbridge`, store/key password `android`).
 
 > [!IMPORTANT]

@@ -64,7 +64,7 @@ Routing is **global with a blocklist**. These keep their stock Jio behaviour and
 - the Jio/preset apps (JioTV+, Hotstar, Netflix, `com.jio.yt`, Zee5, SonyLIV, Sun NXT, Hoichoi, EPIC ON, Ultra Jhakaas, ETV Win, and everything under `com.jio.*`, `com.jiostb.*`, `com.jiotv.*`, `com.iwedia.*`),
 - Settings, SystemUI, `android`, the Jio voice app, the current launcher and MicBridge itself.
 
-**TizenTube** and **Prime Video** are handled through their own search deep links because neither exposes a usable accessibility tree. Prime Video restarts its profile picker before showing the results, so one extra "who's watching?" selection is expected per search.
+**TizenTube** and **Prime Video** are handled through their own search deep links because neither exposes a usable accessibility tree. Prime Video restarts its "who's watching?" picker for every external search; MicBridge presses OK on the profile it highlights (the last one used) and covers the transition with a "Searching Prime Video…" card, so no selection is needed.
 
 Everything else gets the generic flow — **including apps that the Jio launcher has added to `Settings.Global remote_app_list`** (TVExplorer, Shevery, a sideloaded TizenTube, …). Version 1.0 blocked every package in that list, which silently disabled MicBridge for sideloaded apps pinned to the Jio home screen; 1.1 and later use the explicit list above instead.
 
@@ -122,7 +122,7 @@ Press the mic key and speak. The Jio overlay appears for ~2–4 seconds (the fir
 
 - **SmartTube:** press mic anywhere, or press its own search orb.
 - **TizenTube:** press mic anywhere; the app opens its search results for what you said.
-- **Prime Video:** press mic on any screen; pick a profile if Prime asks, then the results open.
+- **Prime Video:** press mic on any screen; the profile picker is answered automatically (it always picks the profile Prime highlights, i.e. the last one used) and the results open.
 - **Nuvio and other apps:** open the app's search screen first if it does not expose a search entry point on the current screen.
 
 ### Injecting a query without speaking
@@ -239,7 +239,8 @@ then rebuild and reinstall.
 | --- | --- |
 | Nothing is typed, log ends with `no text field in <pkg>; nothing typed` and no `search via url` line | The app has no text field, no visible "Search" entry point and no known search URL. Open its search screen first, or add a `micbridge_search` template. |
 | App opens its own search screen instead of filling a box | Expected for apps with no accessible text field (TizenTube, Prime Video). The search deep link is used because there is nothing to type into. |
-| Prime Video asks "who's watching?" after a voice search | Prime restarts its profile flow when a search link arrives. Pick a profile and the results open. |
+| Prime Video search runs as a different profile than expected | MicBridge always answers the picker on the highlighted row, which is the profile last used in Prime. Select the wanted profile once with the remote; it then stays the default. |
+| Prime Video shows "Searching Prime Video…" for a few seconds | Expected: the card covers Prime's profile picker and the load of the results page. The search runs as the highlighted profile. |
 | The mic still opens Jio's universal search, log says `voice overlay over <pkg> -> blocked` | The app is on the built-in Jio/preset/launcher blocklist. Add it to `micbridge_allow` (see above). |
 | The mic still opens Jio's universal search and the log shows nothing after `service connected` | 1.0 logged no routing decisions. Upgrade to 1.2, which logs `blocked` vs `capturing` for every press. |
 | Nothing happens at all | The accessibility service is not enabled/bound. Re-run the enable steps and check `adb logcat -s MicBridge`. |

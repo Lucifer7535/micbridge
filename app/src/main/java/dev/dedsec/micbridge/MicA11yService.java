@@ -8,15 +8,25 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.graphics.Bitmap;
+import android.graphics.PixelFormat;
+import android.hardware.HardwareBuffer;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
+import android.view.Display;
+import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.View;
+import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import java.net.URLEncoder;
 import java.util.List;
@@ -285,32 +295,36 @@ public class MicA11yService extends AccessibilityService {
      */
     private void watchForOverlay(final String keyTarget, final int attempt) {
         if (attempt > 8) return;
-        h.postDelayed(() -> {
-            if (busy) return;
-            if (jioOverlayPresent()) {
-                long now = System.currentTimeMillis();
-                if (now - lastTrigger <= 1000) return;
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (busy) return;
+                if (jioOverlayPresent()) {
+                    long now = System.currentTimeMillis();
+                    if (now - lastTrigger <= 1000) return;
 
-                String target = keyTarget;
-                if (target == null || target.isEmpty()
-                        || JIO_VA.equals(target) || getPackageName().equals(target)) {
-                    target = lastApp;
-                }
-                if (target == null || target.isEmpty()) target = activeAppPackage();
-                if (target == null || target.isEmpty()) return;
+                    String target = keyTarget;
+                    if (target == null || target.isEmpty()
+                            || JIO_VA.equals(target) || getPackageName().equals(target)) {
+                        target = lastApp;
+                    }
+                    if (target == null || target.isEmpty()) target = activeAppPackage();
+                    if (target == null || target.isEmpty()) return;
 
-                if (isBlocked(target)) {
-                    if (now - lastBlockedLog > 3000) {
-                        lastBlockedLog = now;
-                        L.f(this, "voice overlay over " + target
-                                + " (watched) -> blocked");
+                    if (isBlocked(target)) {
+                        if (now - lastBlockedLog > 3000) {
+                            lastBlockedLog = now;
+                            L.f(MicA11yService.this, "voice overlay over " + target
+                                    + " (watched) -> blocked");
+                        }
+                    } else {
+                        L.f(MicA11yService.this,
+                                "voice overlay over " + target + " (watched) -> capturing");
+                        startCapture(target);
                     }
                 } else {
-                    L.f(this, "voice overlay over " + target + " (watched) -> capturing");
-                    startCapture(target);
+                    watchForOverlay(keyTarget, attempt + 1);
                 }
-            } else {
-                watchForOverlay(keyTarget, attempt + 1);
             }
         }, attempt == 0 ? 150 : 250);
     }
@@ -474,7 +488,10 @@ public class MicA11yService extends AccessibilityService {
                     L.f(this, "overlay closed before a query appeared (top=" + top + ")");
                     busy = false;
                 } else {
-                    h.postDelayed(() -> poll(target, tick + 1), 300);
+                    h.postDelayed(new Runnable() {
+            @Override
+            public void run() { poll(target, tick + 1); }
+        }, 300);
                 }
                 return;
             }
@@ -483,7 +500,10 @@ public class MicA11yService extends AccessibilityService {
             busy = false;
             return;
         }
-        h.postDelayed(() -> poll(target, tick + 1), 300);
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() { poll(target, tick + 1); }
+        }, 300);
     }
 
     /** Reads the recognised query out of the Jio overlay, or null. */
@@ -597,7 +617,13 @@ public class MicA11yService extends AccessibilityService {
     // ---- delivery ------------------------------------------------------
 
     private void deliver(final String target, final String text) {
-        h.postDelayed(() -> deliverToApp(target, text, 0), 100);
+        // Each delivery gets its own shot at the URL fallback, including
+        // repeated debug broadcasts in one service lifetime.
+        searchTried = false;
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, 0); }
+        }, 100);
     }
 
     private void deliverToApp(final String target, final String text, final int tries) {
@@ -608,7 +634,10 @@ public class MicA11yService extends AccessibilityService {
             if (tries < 4) {
                 L.f(this, "dismissing Jio overlay");
                 performGlobalAction(GLOBAL_ACTION_BACK);
-                h.postDelayed(() -> deliverToApp(target, text, tries + 1), 500);
+                h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, tries + 1); }
+        }, 500);
             } else {
                 L.f(this, "could not dismiss Jio overlay");
                 busy = false;
@@ -618,7 +647,10 @@ public class MicA11yService extends AccessibilityService {
 
         if (top == null || !top.equals(target)) {
             if (tries < 5) {
-                h.postDelayed(() -> deliverToApp(target, text, tries + 1), 500);
+                h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, tries + 1); }
+        }, 500);
             } else {
                 L.f(this, "target never came to front (" + target + ")");
                 busy = false;
@@ -628,7 +660,10 @@ public class MicA11yService extends AccessibilityService {
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) {
-            if (tries < 5) h.postDelayed(() -> deliverToApp(target, text, tries + 1), 500);
+            if (tries < 5) h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, tries + 1); }
+        }, 500);
             else busy = false;
             return;
         }
@@ -643,7 +678,10 @@ public class MicA11yService extends AccessibilityService {
                 busy = false;
             } else if (tries < 5) {
                 L.f(this, "could not type into " + nodeName(field) + "; retrying");
-                h.postDelayed(() -> deliverToApp(target, text, tries + 1), 450);
+                h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, tries + 1); }
+        }, 450);
             } else {
                 L.f(this, "could not type into " + nodeName(field));
                 busy = false;
@@ -657,7 +695,10 @@ public class MicA11yService extends AccessibilityService {
                 searchClicked = true;
                 L.f(this, "opening search in " + target + " via " + nodeName(s));
                 click(s);
-                h.postDelayed(() -> deliverToApp(target, text, tries + 1), 900);
+                h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, tries + 1); }
+        }, 900);
                 return;
             }
         }
@@ -671,7 +712,10 @@ public class MicA11yService extends AccessibilityService {
         }
 
         if (tries < 5) {
-            h.postDelayed(() -> deliverToApp(target, text, tries + 1), 600);
+            h.postDelayed(new Runnable() {
+            @Override
+            public void run() { deliverToApp(target, text, tries + 1); }
+        }, 600);
         } else {
             AccessibilityNodeInfo focus = null;
             try { focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT); }
@@ -761,11 +805,288 @@ public class MicA11yService extends AccessibilityService {
             }
             startActivity(i);
             L.f(this, "search via url in " + pkg + ": " + url);
+            if (PRIME_PKG.equals(pkg)) {
+                // Prime's Android TV build restarts its web session for every
+                // external link and asks "Who's watching?". Cover the screen
+                // while the picker loads and answer it with OK, so the profile
+                // list is never on screen. primeSelectProfile() stays as the
+                // safety net in case the picker was not up yet.
+                primePresses = 0;
+                showPrimeCover();
+                h.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (pressOk(pkg)) {
+                            primePresses++;
+                            L.f(MicA11yService.this, "prime: answered picker with OK");
+                        }
+                        h.postDelayed(new Runnable() {
+                            @Override
+                            public void run() {
+                                hidePrimeCover();
+                                primeSelectProfile(pkg, 0);
+                            }
+                        }, 1700);
+                    }
+                }, 1500);
+            }
             return true;
         } catch (Throwable t) {
             L.f(this, "search url failed for " + pkg + ": " + t);
             return false;
         }
+    }
+
+    // ---- Prime Video profile gate --------------------------------------
+
+    private static final int PRIME_ATTEMPTS = 20;
+    private int primePresses;
+
+    /** Full-screen card shown once the picker has been answered, so the
+     *  profile list is not left on screen while Prime runs the search. */
+    private View primeCover;
+    private WindowManager primeCoverWm;
+
+    private void showPrimeCover() {
+        if (primeCover != null) return;
+        try {
+            if (primeCoverWm == null) {
+                primeCoverWm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            }
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setGravity(Gravity.CENTER);
+            box.setBackgroundColor(0xFF0B0F14);
+
+            TextView label = new TextView(this);
+            label.setText("Searching Prime Video\u2026");
+            label.setTextColor(0xFFE6E8EB);
+            label.setTextSize(24);
+            label.setGravity(Gravity.CENTER);
+            box.addView(label, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT));
+
+            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    PixelFormat.TRANSLUCENT);
+            primeCoverWm.addView(box, lp);
+            primeCover = box;
+        } catch (Throwable t) {
+            L.f(this, "prime cover failed: " + t);
+            primeCover = null;
+        }
+    }
+
+    private void hidePrimeCover() {
+        if (primeCover == null) return;
+        try {
+            primeCoverWm.removeViewImmediate(primeCover);
+        } catch (Throwable ignored) {
+        }
+        primeCover = null;
+    }
+
+    @Override
+    public void onDestroy() {
+        hidePrimeCover();
+        super.onDestroy();
+    }
+
+    /**
+     * Waits for Prime's profile picker and presses OK on the profile it
+     * highlights.
+     *
+     * Prime's Android TV build always opens "Who's watching?" before running
+     * an external search, but the search is queued behind the gate: picking a
+     * profile runs it. The gate is drawn by Prime's own engine on a single
+     * Ignite surface and exposes no usable accessibility nodes, so the picker
+     * is recognised from a screenshot (its focus ring) and the engine's
+     * clickable surface node is clicked, which the app treats as the remote's
+     * select key.
+     */
+    private void primeSelectProfile(final String pkg, final int attempt) {
+        if (Build.VERSION.SDK_INT < 30) return;
+        if (attempt > PRIME_ATTEMPTS || primePresses >= 3) {
+            L.f(this, "prime: profile picker not detected");
+            hidePrimeCover();
+            return;
+        }
+        // While the cover is up it is the front window, so do not use
+        // activeAppPackage() to decide whether Prime is still in front.
+        if (primeCover == null && !pkg.equals(activeAppPackage())) {
+            h.postDelayed(new Runnable() {
+            @Override
+            public void run() { primeSelectProfile(pkg, attempt + 1); }
+        }, 500);
+            return;
+        }
+        try {
+            takeScreenshot(Display.DEFAULT_DISPLAY, getMainExecutor(),
+                    new TakeScreenshotCallback() {
+                        @Override
+                        public void onSuccess(ScreenshotResult res) {
+                            HardwareBuffer hb = res.getHardwareBuffer();
+                            Bitmap soft = null;
+                            boolean picker = false;
+                            try {
+                                // getPixel() is not supported on the hardware
+                                // bitmap, so copy it into a software one first.
+                                Bitmap hw = Bitmap.wrapHardwareBuffer(hb, res.getColorSpace());
+                                if (hw != null) {
+                                    soft = hw.copy(Bitmap.Config.ARGB_8888, false);
+                                    hw.recycle();
+                                }
+                                picker = soft != null && findProfileRingY(soft) >= 0;
+                            } catch (Throwable t) {
+                                L.e("prime screenshot: " + t);
+                            } finally {
+                                if (soft != null) soft.recycle();
+                                try { hb.close(); } catch (Throwable ignored) {}
+                            }
+                            if (picker) {
+                                if (pressOk(pkg)) {
+                                    primePresses++;
+                                    L.f(MicA11yService.this, "prime: picked highlighted profile ("
+                                            + primePresses + ")");
+                                    showPrimeCover();
+                                    // Let the engine load the queued search
+                                    // behind the cover, then look again.
+                                    h.postDelayed(new Runnable() {
+            @Override
+            public void run() { hidePrimeCover(); primeSelectProfile(pkg, attempt + 1); }
+        }, 1800);
+                                    return;
+                                }
+                            } else if (primePresses > 0) {
+                                // A profile was picked and the picker is gone:
+                                // Prime is already running the queued search.
+                                hidePrimeCover();
+                                L.f(MicA11yService.this, "prime: picker gone, search running");
+                                return;
+                            }
+                            h.postDelayed(new Runnable() {
+            @Override
+            public void run() { primeSelectProfile(pkg, attempt + 1); }
+        }, 900);
+                        }
+
+                        @Override
+                        public void onFailure(int errorCode) {
+                            // 3 = the engine's minimum interval between
+                            // screenshots; back off so the next one works.
+                            L.e("prime screenshot failed: " + errorCode);
+                            h.postDelayed(new Runnable() {
+            @Override
+            public void run() { primeSelectProfile(pkg, attempt + 1); }
+        }, 1100);
+                        }
+                    });
+        } catch (Throwable t) {
+            L.e("prime takeScreenshot: " + t);
+        }
+    }
+
+    /**
+     * Sends "select" to whatever Prime has focused by clicking the engine's
+     * surface view. Accessibility gesture injection is refused on this device
+     * (its TV display is not touchable), but the Ignite surface is clickable
+     * and maps ACTION_CLICK to the remote's OK key.
+     */
+    private boolean pressOk(String pkg) {
+        try {
+            List<AccessibilityWindowInfo> ws = getWindows();
+            if (ws == null) return false;
+            for (AccessibilityWindowInfo w : ws) {
+                AccessibilityNodeInfo r = w.getRoot();
+                if (r == null) continue;
+                CharSequence p = r.getPackageName();
+                if (p == null || !pkg.contentEquals(p)) continue;
+                AccessibilityNodeInfo n = firstClickable(r, 0);
+                if (n != null && n.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                    return true;
+                }
+            }
+        } catch (Throwable t) {
+            L.e("prime pressOk: " + t);
+        }
+        return false;
+    }
+
+    private AccessibilityNodeInfo firstClickable(AccessibilityNodeInfo n, int d) {
+        if (n == null || d > 30) return null;
+        if (n.isClickable()) return n;
+        for (int i = 0; i < n.getChildCount(); i++) {
+            AccessibilityNodeInfo c = firstClickable(n.getChild(i), d + 1);
+            if (c != null) return c;
+        }
+        return null;
+    }
+
+    /**
+     * Finds the highlighted profile's vertical centre. Only the focus ring is
+     * near-white, and it straddles the fixed avatar column: each ring row has
+     * white at both the avatar's left and right edge, so the tallest band of
+     * rows that are white on both sides is the ring. Its height is checked so
+     * that other white areas (text, artwork) cannot be mistaken for it, and
+     * the ring's interior must stay dark/coloured rather than white.
+     */
+    private int findProfileRingY(Bitmap bmp) {
+        int w = bmp.getWidth();
+        int h = bmp.getHeight();
+        int lx0 = Math.max(0, (int) (w * 0.070));
+        int lx1 = Math.min(w - 1, (int) (w * 0.095));
+        int rx0 = Math.max(0, (int) (w * 0.148));
+        int rx1 = Math.min(w - 1, (int) (w * 0.170));
+        int runStart = -1, bestStart = -1, bestLen = 0;
+        for (int y = (int) (h * 0.04); y < (int) (h * 0.96); y++) {
+            boolean ringRow = rowHasWhite(bmp, y, lx0, lx1)
+                    && rowHasWhite(bmp, y, rx0, rx1);
+            if (ringRow) {
+                if (runStart < 0) runStart = y;
+            } else if (runStart >= 0) {
+                int len = y - runStart;
+                if (len > bestLen) { bestLen = len; bestStart = runStart; }
+                runStart = -1;
+            }
+        }
+        if (runStart >= 0) {
+            int len = (int) (h * 0.96) - runStart;
+            if (len > bestLen) { bestLen = len; bestStart = runStart; }
+        }
+        // A profile ring is a fixed fraction of the screen height; anything
+        // much shorter or taller is some other white element.
+        if (bestLen < (int) (h * 0.05) || bestLen > (int) (h * 0.20)) return -1;
+        int cy = bestStart + bestLen / 2;
+        // Inside the ring sits the avatar image, never a white block.
+        int ix0 = (int) (w * 0.105);
+        int ix1 = (int) (w * 0.145);
+        int bright = 0, total = 0;
+        for (int x = ix0; x <= ix1; x += 2) {
+            total++;
+            if (isWhite(bmp.getPixel(x, cy))) bright++;
+        }
+        if (total == 0 || bright * 2 > total) return -1;
+        return cy;
+    }
+
+    private boolean rowHasWhite(Bitmap bmp, int y, int x0, int x1) {
+        for (int x = x0; x <= x1; x++) {
+            if (isWhite(bmp.getPixel(x, y))) return true;
+        }
+        return false;
+    }
+
+    private boolean isWhite(int c) {
+        int r = (c >> 16) & 0xff;
+        int g = (c >> 8) & 0xff;
+        int b = c & 0xff;
+        return r > 230 && g > 230 && b > 230;
     }
 
     // ---- helpers -------------------------------------------------------

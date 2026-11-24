@@ -77,10 +77,13 @@ public class RecognizeActivity extends Activity implements RecognitionListener {
             sr.startListening(i);
             L.f(this, "RecognizeActivity started listening");
 
-            h.postDelayed(() -> {
-                if (!done) {
-                    L.f(this, "RecognizeActivity timeout");
-                    finishCancelled();
+            h.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    if (!done) {
+                        L.f(RecognizeActivity.this, "RecognizeActivity timeout");
+                        finishCancelled();
+                    }
                 }
             }, 15000);
         } catch (Throwable t) {

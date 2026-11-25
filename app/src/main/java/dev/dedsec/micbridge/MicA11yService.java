@@ -6,8 +6,10 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
+import android.app.SearchManager;
 import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.hardware.HardwareBuffer;
@@ -29,6 +31,8 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import java.net.URLEncoder;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -80,30 +84,8 @@ public class MicA11yService extends AccessibilityService {
      */
     static final String SETTING_SEARCH = "micbridge_search";
 
-    /** Packages that always keep the stock Jio mic behaviour. */
-    private static final String[] BLOCKED_EXACT = {
-            "android",
-            "com.android.systemui",
-            "com.android.settings",
-            "com.android.tv.settings",
-            "com.android.tv.settings.local",
-            "com.klevico.monet",
-            "com.gathin.tvhome",
-            "in.startv.hotstar",
-            "com.netflix.ninja",
-            "com.zee5.aosp",
-            "com.suntv.sunnxt",
-            "com.hoichoi.mitv",
-            "com.epicchannel.epicon",
-            "com.ultrajhakaas.android",
-            "com.etvwin.androidtv",
-    };
-    private static final String[] BLOCKED_PREFIX = {
-            "com.iwedia.",
-            "com.jio.",
-            "com.jiostb.",
-            "com.jiotv.",
-    };
+    /** AccessibilityNodeInfo.ACTION_IME_ENTER, added in API 30. */
+    private static final int ACTION_IME_ENTER = 0x01000000;
 
     private final Handler h = new Handler(Looper.getMainLooper());
 
@@ -122,13 +104,14 @@ public class MicA11yService extends AccessibilityService {
     private boolean overlaySeen;
     private int overlayAbsentCount;
 
-    /** set once we clicked a search entry point for the current capture */
-    private boolean searchClicked;
+    /** how many search entry points we clicked for the current capture */
+    private int searchClicks;
 
     /** set once we tried the search-URL fallback for the current capture */
     private boolean searchTried;
 
-    private String homePkg;
+    /** set once we tried an ACTION_SEARCH intent for the current capture */
+    private boolean searchIntentTried;
 
     @Override
     protected void onServiceConnected() {
@@ -143,8 +126,10 @@ public class MicA11yService extends AccessibilityService {
         }
         L.f(this, "service connected; flags=" + (info == null ? -1 : info.flags)
                 + " home=" + homePackage());
-        L.f(this, "blocklist: Jio/preset + launcher + Settings/SystemUI; allow="
-                + allowSetting() + " block=" + blockSetting()
+        L.f(this, "rules: mode=" + Rules.mode(this)
+                + " enabled=" + Rules.enabled(this).size()
+                + " disabled=" + Rules.disabled(this).size()
+                + "; allow=" + allowSetting() + " block=" + blockSetting()
                 + " search=" + searchSetting());
 
         // Debug hook: adb shell am broadcast -a dev.dedsec.micbridge.TEST
@@ -381,39 +366,20 @@ public class MicA11yService extends AccessibilityService {
     }
 
     /**
-     * True when the package keeps its stock mic behaviour: Jio/preset apps,
-     * the launcher, Settings, SystemUI, the voice app and ourselves.
-     * micbridge_allow always wins; micbridge_block forces a package back to
-     * the stock behaviour.
+     * True when the package keeps its stock mic behaviour. The settings
+     * screen (Rules) decides by default; the adb overrides stay live and win:
+     * micbridge_allow forces routing on, micbridge_block forces it off.
      */
     private boolean isBlocked(String pkg) {
         if (pkg == null || pkg.isEmpty()) return true;
         if (JIO_VA.equals(pkg) || getPackageName().equals(pkg)) return true;
         if (isAllowed(pkg)) return false;
         if (matchesList(pkg, blockSetting())) return true;
-        if (pkg.equals(homePackage())) return true;
-
-        for (String s : BLOCKED_EXACT) {
-            if (s.equals(pkg)) return true;
-        }
-        for (String s : BLOCKED_PREFIX) {
-            if (pkg.startsWith(s)) return true;
-        }
-        return false;
+        return !Rules.isEnabled(this, pkg);
     }
 
     private String homePackage() {
-        if (homePkg != null) return homePkg;
-        try {
-            Intent i = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
-            ResolveInfo r = getPackageManager()
-                    .resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY);
-            if (r != null && r.activityInfo != null) {
-                homePkg = r.activityInfo.packageName;
-            }
-        } catch (Throwable ignored) {}
-        if (homePkg == null) homePkg = "";
-        return homePkg;
+        return Rules.homePackage(this);
     }
 
     /** True when the Jio voice overlay window is on screen. */
@@ -438,8 +404,9 @@ public class MicA11yService extends AccessibilityService {
         lastTrigger = System.currentTimeMillis();
         lastQuery = null;
         stableCount = 0;
-        searchClicked = false;
+        searchClicks = 0;
         searchTried = false;
+        searchIntentTried = false;
         overlaySeen = false;
         overlayAbsentCount = 0;
         poll(target, 0);
@@ -617,9 +584,11 @@ public class MicA11yService extends AccessibilityService {
     // ---- delivery ------------------------------------------------------
 
     private void deliver(final String target, final String text) {
-        // Each delivery gets its own shot at the URL fallback, including
+        // Each delivery gets its own shot at opening search, including
         // repeated debug broadcasts in one service lifetime.
+        searchClicks = 0;
         searchTried = false;
+        searchIntentTried = false;
         h.postDelayed(new Runnable() {
             @Override
             public void run() { deliverToApp(target, text, 0); }
@@ -646,7 +615,7 @@ public class MicA11yService extends AccessibilityService {
         }
 
         if (top == null || !top.equals(target)) {
-            if (tries < 5) {
+            if (tries < 9) {
                 h.postDelayed(new Runnable() {
             @Override
             public void run() { deliverToApp(target, text, tries + 1); }
@@ -659,22 +628,15 @@ public class MicA11yService extends AccessibilityService {
         }
 
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null) {
-            if (tries < 5) h.postDelayed(new Runnable() {
-            @Override
-            public void run() { deliverToApp(target, text, tries + 1); }
-        }, 500);
-            else busy = false;
-            return;
-        }
-
-        AccessibilityNodeInfo field = focusedEditable(root);
-        if (field == null) field = firstEditable(root);
-        if (field == null) field = findLeanbackField(root, 0);
+        AccessibilityNodeInfo field = findField(target, root);
 
         if (field != null) {
+            boolean lean = isLeanbackField(field);
             if (typeInto(field, text)) {
                 L.f(this, "typed into " + target + " (" + nodeName(field) + "): " + text);
+                // A plain EditText usually needs its own Search button or an
+                // IME action; Leanback fields search as they are filled.
+                if (!lean) submitSearch(target, root, field);
                 busy = false;
             } else if (tries < 5) {
                 L.f(this, "could not type into " + nodeName(field) + "; retrying");
@@ -689,10 +651,10 @@ public class MicA11yService extends AccessibilityService {
             return;
         }
 
-        if (!searchClicked && tries < 4) {
-            AccessibilityNodeInfo s = findSearch(root);
+        if (searchClicks < 3 && tries < 7) {
+            AccessibilityNodeInfo s = findSearchAnywhere(target, root);
             if (s != null) {
-                searchClicked = true;
+                searchClicks++;
                 L.f(this, "opening search in " + target + " via " + nodeName(s));
                 click(s);
                 h.postDelayed(new Runnable() {
@@ -709,21 +671,253 @@ public class MicA11yService extends AccessibilityService {
                 busy = false;
                 return;
             }
+            if (!searchIntentTried) {
+                searchIntentTried = true;
+                if (launchSearchIntent(target, text)) {
+                    busy = false;
+                    return;
+                }
+            }
         }
 
-        if (tries < 5) {
+        if (tries < 9) {
             h.postDelayed(new Runnable() {
             @Override
             public void run() { deliverToApp(target, text, tries + 1); }
         }, 600);
         } else {
             AccessibilityNodeInfo focus = null;
-            try { focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT); }
-            catch (Throwable ignored) {}
+            if (root != null) {
+                try { focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT); }
+                catch (Throwable ignored) {}
+            }
             L.f(this, "no text field in " + target
                     + " (focus=" + nodeName(focus) + "); nothing typed");
             busy = false;
         }
+    }
+
+    // ---- finding a text field / search entry ---------------------------
+
+    /** Focused/editable field in the active window, else in any window of pkg. */
+    private AccessibilityNodeInfo findField(String pkg, AccessibilityNodeInfo activeRoot) {
+        AccessibilityNodeInfo f = fieldIn(activeRoot);
+        if (f != null) return f;
+        for (AccessibilityNodeInfo r : appRoots(pkg)) {
+            if (r.equals(activeRoot)) continue;
+            f = fieldIn(r);
+            if (f != null) return f;
+        }
+        return null;
+    }
+
+    private AccessibilityNodeInfo fieldIn(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        AccessibilityNodeInfo f = focusedEditable(root);
+        if (f == null) f = firstEditable(root);
+        if (f == null) f = findLeanbackField(root, 0);
+        return f;
+    }
+
+    /** Roots of every on-screen window that belongs to pkg. */
+    private List<AccessibilityNodeInfo> appRoots(String pkg) {
+        List<AccessibilityNodeInfo> out = new ArrayList<>();
+        if (pkg == null || pkg.isEmpty()) return out;
+        try {
+            List<AccessibilityWindowInfo> ws = getWindows();
+            if (ws == null) return out;
+            for (AccessibilityWindowInfo w : ws) {
+                if (w == null || w.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                AccessibilityNodeInfo r = w.getRoot();
+                if (r == null || r.getPackageName() == null) continue;
+                if (pkg.contentEquals(r.getPackageName())) out.add(r);
+            }
+        } catch (Throwable ignored) {}
+        return out;
+    }
+
+    private AccessibilityNodeInfo findSearchAnywhere(String pkg, AccessibilityNodeInfo activeRoot) {
+        AccessibilityNodeInfo s = findSearch(activeRoot);
+        if (s != null) return s;
+        for (AccessibilityNodeInfo r : appRoots(pkg)) {
+            if (r.equals(activeRoot)) continue;
+            s = findSearch(r);
+            if (s != null) return s;
+        }
+        // Last resort: some TV rails (Zee5) only expose icon-only items
+        // until they are expanded. Their top item is the search entry.
+        return findRailSearch(pkg, activeRoot);
+    }
+
+    /**
+     * Finds the top icon-only entry of a left-hand nav rail: a clickable
+     * view hugging the left edge, in the lower part of the screen, with no
+     * text and an icon child. Zee5's collapsed rail (search / upgrade /
+     * account) has exactly this shape and no accessible labels.
+     */
+    private AccessibilityNodeInfo findRailSearch(String pkg, AccessibilityNodeInfo activeRoot) {
+        List<AccessibilityNodeInfo> roots = appRoots(pkg);
+        if (activeRoot != null) {
+            boolean have = false;
+            for (AccessibilityNodeInfo r : roots) {
+                if (r.equals(activeRoot)) { have = true; break; }
+            }
+            if (!have) roots.add(0, activeRoot);
+        }
+        for (AccessibilityNodeInfo r : roots) {
+            List<AccessibilityNodeInfo> rail = new ArrayList<>();
+            collectRail(r, rail, 0);
+            if (rail.isEmpty()) continue;
+            Collections.sort(rail, new java.util.Comparator<AccessibilityNodeInfo>() {
+                @Override
+                public int compare(AccessibilityNodeInfo a, AccessibilityNodeInfo b) {
+                    android.graphics.Rect ra = new android.graphics.Rect();
+                    android.graphics.Rect rb = new android.graphics.Rect();
+                    a.getBoundsInScreen(ra);
+                    b.getBoundsInScreen(rb);
+                    return ra.top - rb.top;
+                }
+            });
+            L.f(this, "rail: " + rail.size() + " icon-only entries");
+            return rail.get(0);
+        }
+        return null;
+    }
+
+    private void collectRail(AccessibilityNodeInfo n, List<AccessibilityNodeInfo> out, int d) {
+        if (n == null || d > 25) return;
+        try {
+            android.graphics.Rect b = new android.graphics.Rect();
+            n.getBoundsInScreen(b);
+            android.util.DisplayMetrics dm = getResources().getDisplayMetrics();
+            boolean leftEdge = b.left <= dm.widthPixels * 0.06f;
+            boolean railSized = b.width() > 0 && b.width() <= dm.widthPixels * 0.35f
+                    && b.height() >= 40 && b.height() <= 170;
+            boolean lowerHalf = b.top >= dm.heightPixels * 0.33f;
+            if (n.isClickable() && leftEdge && railSized && lowerHalf
+                    && !hasText(n) && hasIconChild(n)) {
+                out.add(n);
+                return;
+            }
+            for (int i = 0; i < n.getChildCount(); i++) {
+                collectRail(n.getChild(i), out, d + 1);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private boolean hasText(AccessibilityNodeInfo n) {
+        try {
+            CharSequence t = n.getText();
+            CharSequence d = n.getContentDescription();
+            return (t != null && t.length() > 0) || (d != null && d.length() > 0);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private boolean hasIconChild(AccessibilityNodeInfo n) {
+        return hasIconChild(n, 0);
+    }
+
+    private boolean hasIconChild(AccessibilityNodeInfo n, int d) {
+        if (n == null || d > 4) return false;
+        try {
+            for (int i = 0; i < n.getChildCount(); i++) {
+                AccessibilityNodeInfo c = n.getChild(i);
+                CharSequence k = c.getClassName();
+                if (k != null && k.toString().contains("ImageView")) return true;
+                if (hasIconChild(c, d + 1)) return true;
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private boolean isLeanbackField(AccessibilityNodeInfo n) {
+        if (n == null) return false;
+        try {
+            CharSequence c = n.getClassName();
+            if (c != null) {
+                String s = c.toString();
+                if (s.contains("StreamingTextView") || s.contains("SearchEditText")) return true;
+            }
+            String id = viewId(n);
+            if (id != null) {
+                String low = id.toLowerCase(Locale.US);
+                if (low.contains("search_text") || low.endsWith("search_editor")
+                        || low.endsWith("search_box") || low.endsWith("search_field")) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
+    /**
+     * Plain EditTexts (Zee5, Hotstar, ...) do not run the search when their
+     * text is set: they have a separate Search button, or the IME action
+     * submits it. Try the app's own button first, then the IME action.
+     */
+    private void submitSearch(final String pkg, final AccessibilityNodeInfo root,
+                              final AccessibilityNodeInfo field) {
+        h.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                AccessibilityNodeInfo btn = root == null
+                        ? null : findSubmitButton(root, field, 0);
+                if (btn == null) {
+                    for (AccessibilityNodeInfo r : appRoots(pkg)) {
+                        btn = findSubmitButton(r, field, 0);
+                        if (btn != null) break;
+                    }
+                }
+                if (btn != null) {
+                    L.f(MicA11yService.this, "search submit via " + nodeName(btn));
+                    click(btn);
+                    return;
+                }
+                if (Build.VERSION.SDK_INT >= 30) {
+                    try {
+                        boolean ok = field.performAction(ACTION_IME_ENTER);
+                        L.f(MicA11yService.this, "search submit via IME enter ok=" + ok);
+                    } catch (Throwable t) {
+                        L.f(MicA11yService.this, "search submit failed: " + t);
+                    }
+                }
+            }
+        }, 400);
+    }
+
+    private AccessibilityNodeInfo findSubmitButton(AccessibilityNodeInfo n,
+                                                   AccessibilityNodeInfo field, int depth) {
+        if (n == null || depth > 30) return null;
+        if (field != null && n.equals(field)) return null;
+        try {
+            String id = viewId(n);
+            if (id != null) {
+                String low = id.toLowerCase(Locale.US);
+                if (low.contains("search_button") || low.contains("search_btn")
+                        || low.contains("btn_search") || low.contains("search_submit")
+                        || low.endsWith("search_go")) {
+                    return n;
+                }
+            }
+            CharSequence cls = n.getClassName();
+            String c = cls == null ? "" : cls.toString();
+            if ((c.endsWith("Button") || c.contains("ImageButton"))
+                    && (mentionsSearch(n.getText())
+                        || mentionsSearch(n.getContentDescription()))) {
+                return n;
+            }
+            for (int i = 0; i < n.getChildCount(); i++) {
+                AccessibilityNodeInfo r = findSubmitButton(n.getChild(i), field, depth + 1);
+                if (r != null) return r;
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private String viewId(AccessibilityNodeInfo n) {
+        try { return n.getViewIdResourceName(); } catch (Throwable t) { return null; }
     }
 
     // ---- search by URL / intent ----------------------------------------
@@ -803,16 +997,18 @@ public class MicA11yService extends AccessibilityService {
                 L.f(this, "search url not handled by " + pkg + ": " + url);
                 return false;
             }
+            // Cover the launch itself and the app's loading screen. The card
+            // is opaque, so it has to be removed before the screenshot-based
+            // Prime detector runs.
+            showCover(pkg);
             startActivity(i);
             L.f(this, "search via url in " + pkg + ": " + url);
             if (PRIME_PKG.equals(pkg)) {
                 // Prime's Android TV build restarts its web session for every
-                // external link and asks "Who's watching?". Cover the screen
-                // while the picker loads and answer it with OK, so the profile
-                // list is never on screen. primeSelectProfile() stays as the
-                // safety net in case the picker was not up yet.
+                // external link and asks "Who's watching?". Answer the picker
+                // with OK while the cover hides it, then let the screenshot
+                // detector take over as the safety net.
                 primePresses = 0;
-                showPrimeCover();
                 h.postDelayed(new Runnable() {
                     @Override
                     public void run() {
@@ -823,35 +1019,71 @@ public class MicA11yService extends AccessibilityService {
                         h.postDelayed(new Runnable() {
                             @Override
                             public void run() {
-                                hidePrimeCover();
+                                hideCover();
                                 primeSelectProfile(pkg, 0);
                             }
                         }, 1700);
                     }
                 }, 1500);
+            } else {
+                h.postDelayed(new Runnable() {
+                    @Override
+                    public void run() { hideCover(); }
+                }, 2000);
             }
             return true;
         } catch (Throwable t) {
+            hideCover();
             L.f(this, "search url failed for " + pkg + ": " + t);
             return false;
         }
     }
 
-    // ---- Prime Video profile gate --------------------------------------
+    /**
+     * Universal last resort: hand the query to the app's own ACTION_SEARCH
+     * activity. Works for apps that implement Android's search framework but
+     * expose no field or search entry on the current screen.
+     */
+    private boolean launchSearchIntent(String pkg, String text) {
+        try {
+            Intent i = new Intent(Intent.ACTION_SEARCH);
+            i.setPackage(pkg);
+            i.putExtra(SearchManager.QUERY, text);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (getPackageManager().resolveActivity(i, PackageManager.MATCH_DEFAULT_ONLY) == null) {
+                L.f(this, "no ACTION_SEARCH handler in " + pkg);
+                return false;
+            }
+            showCover(pkg);
+            startActivity(i);
+            L.f(this, "search via ACTION_SEARCH in " + pkg);
+            h.postDelayed(new Runnable() {
+                @Override
+                public void run() { hideCover(); }
+            }, 2000);
+            return true;
+        } catch (Throwable t) {
+            hideCover();
+            L.f(this, "ACTION_SEARCH failed for " + pkg + ": " + t);
+            return false;
+        }
+    }
+
+    // ---- "Searching <app>..." card -------------------------------------
 
     private static final int PRIME_ATTEMPTS = 20;
     private int primePresses;
 
-    /** Full-screen card shown once the picker has been answered, so the
-     *  profile list is not left on screen while Prime runs the search. */
-    private View primeCover;
-    private WindowManager primeCoverWm;
+    /** Full-screen card shown while a search link loads, so the app switch,
+     *  Prime's profile picker and the results load are not exposed. */
+    private View cover;
+    private WindowManager coverWm;
 
-    private void showPrimeCover() {
-        if (primeCover != null) return;
+    private void showCover(String pkg) {
+        if (cover != null) return;
         try {
-            if (primeCoverWm == null) {
-                primeCoverWm = (WindowManager) getSystemService(WINDOW_SERVICE);
+            if (coverWm == null) {
+                coverWm = (WindowManager) getSystemService(WINDOW_SERVICE);
             }
             LinearLayout box = new LinearLayout(this);
             box.setOrientation(LinearLayout.VERTICAL);
@@ -859,7 +1091,7 @@ public class MicA11yService extends AccessibilityService {
             box.setBackgroundColor(0xFF0B0F14);
 
             TextView label = new TextView(this);
-            label.setText("Searching Prime Video\u2026");
+            label.setText("Searching " + appLabel(pkg) + "\u2026");
             label.setTextColor(0xFFE6E8EB);
             label.setTextSize(24);
             label.setGravity(Gravity.CENTER);
@@ -875,26 +1107,37 @@ public class MicA11yService extends AccessibilityService {
                             | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                             | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                     PixelFormat.TRANSLUCENT);
-            primeCoverWm.addView(box, lp);
-            primeCover = box;
+            coverWm.addView(box, lp);
+            cover = box;
+            L.f(this, "cover: Searching " + appLabel(pkg));
         } catch (Throwable t) {
-            L.f(this, "prime cover failed: " + t);
-            primeCover = null;
+            L.f(this, "cover failed: " + t);
+            cover = null;
         }
     }
 
-    private void hidePrimeCover() {
-        if (primeCover == null) return;
+    private void hideCover() {
+        if (cover == null) return;
         try {
-            primeCoverWm.removeViewImmediate(primeCover);
+            coverWm.removeViewImmediate(cover);
         } catch (Throwable ignored) {
         }
-        primeCover = null;
+        cover = null;
+    }
+
+    /** User-facing name for the "Searching ..." card. */
+    private String appLabel(String pkg) {
+        try {
+            ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
+            CharSequence l = getPackageManager().getApplicationLabel(ai);
+            if (l != null && l.length() > 0) return l.toString();
+        } catch (Throwable ignored) {}
+        return pkg;
     }
 
     @Override
     public void onDestroy() {
-        hidePrimeCover();
+        hideCover();
         super.onDestroy();
     }
 
@@ -914,12 +1157,12 @@ public class MicA11yService extends AccessibilityService {
         if (Build.VERSION.SDK_INT < 30) return;
         if (attempt > PRIME_ATTEMPTS || primePresses >= 3) {
             L.f(this, "prime: profile picker not detected");
-            hidePrimeCover();
+            hideCover();
             return;
         }
         // While the cover is up it is the front window, so do not use
         // activeAppPackage() to decide whether Prime is still in front.
-        if (primeCover == null && !pkg.equals(activeAppPackage())) {
+        if (cover == null && !pkg.equals(activeAppPackage())) {
             h.postDelayed(new Runnable() {
             @Override
             public void run() { primeSelectProfile(pkg, attempt + 1); }
@@ -954,19 +1197,19 @@ public class MicA11yService extends AccessibilityService {
                                     primePresses++;
                                     L.f(MicA11yService.this, "prime: picked highlighted profile ("
                                             + primePresses + ")");
-                                    showPrimeCover();
+                                    showCover(pkg);
                                     // Let the engine load the queued search
                                     // behind the cover, then look again.
                                     h.postDelayed(new Runnable() {
             @Override
-            public void run() { hidePrimeCover(); primeSelectProfile(pkg, attempt + 1); }
+            public void run() { hideCover(); primeSelectProfile(pkg, attempt + 1); }
         }, 1800);
                                     return;
                                 }
                             } else if (primePresses > 0) {
                                 // A profile was picked and the picker is gone:
                                 // Prime is already running the queued search.
-                                hidePrimeCover();
+                                hideCover();
                                 L.f(MicA11yService.this, "prime: picker gone, search running");
                                 return;
                             }
@@ -1200,7 +1443,16 @@ public class MicA11yService extends AccessibilityService {
             // the app's own chrome can be a search entry point.
             CharSequence cls = n.getClassName();
             if (cls != null && cls.toString().contains("WebView")) return null;
+            // The search box itself is handled by findField() before this.
+            if (isEditable(n)) return null;
             if (mentionsSearch(n.getText()) || mentionsSearch(n.getContentDescription())) {
+                return n;
+            }
+            // Icon-only entries (Zee5's rail, Hotstar's magnifier) carry no
+            // text, but their view id does.
+            String id = viewId(n);
+            if (id != null && n.isClickable()
+                    && id.toLowerCase(Locale.US).contains("search")) {
                 return n;
             }
             for (int i = 0; i < n.getChildCount(); i++) {

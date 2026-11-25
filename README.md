@@ -49,24 +49,49 @@ Delivery is generic, in this order:
 1. the focused editable field,
 2. otherwise the first editable field in the window,
 3. otherwise a Leanback search box: a node whose class contains `StreamingTextView`/`SearchEditText`, or whose id looks like a search field (`lb_search_text_editor`, `search_text`, `search_box`, …),
-4. otherwise the first node whose text or content description mentions "Search" (clicked, then retried — this is what opens the search screen in SmartTube and most Leanback apps),
-5. otherwise a search-URL fallback: open the app's own search results with an `ACTION_VIEW` deep link (`https://www.youtube.com/results?search_query=…` for YouTube/Cobalt builds, `https://app.primevideo.com/search?phrase=…` for Prime Video, a Google search for supported browsers),
-6. otherwise it gives up quietly — nothing is typed and the app is left untouched.
+4. otherwise a search entry point — a clickable node whose text, content description or id mentions "Search". It is clicked, and delivery retries on the screen that opens. If nothing labelled is found, MicBridge falls back to the collapsed left-hand navigation rail used by apps such as Zee5 (icon-only entries with no accessible label; the top one is Search),
+5. a plain `EditText` is submitted with the screen's own search button (ids such as `search_button`) or an IME action, because those fields do not search as you type,
+6. otherwise a search-URL fallback: open the app's own search results with an `ACTION_VIEW` deep link (`https://www.youtube.com/results?search_query=…` for YouTube/Cobalt builds, `https://app.primevideo.com/search?phrase=…` for Prime Video, a Google search for supported browsers), or an `ACTION_SEARCH` intent,
+7. otherwise it gives up quietly — nothing is typed and the app is left untouched.
 
 Leanback apps such as SmartTube have no editable field at all: their search box is a `StreamingTextView`, so it is filled with `ACTION_SET_TEXT` directly. Browsers such as TV Bro get an extra click + focus + retry because their WebView text field often rejects the first `ACTION_SET_TEXT`. Cobalt builds such as TizenTube and Amazon Ignition (Prime Video) expose an almost empty accessibility tree, so after the field attempts fail their own link handler is used instead.
 
+### Apps with no text field anywhere
+
+Zee5 is the reference case: its home screen has no search box, only a collapsed rail whose Search item is an unlabelled icon. MicBridge clicks that item, waits for Zee5's search screen, types into its `EditText` and presses its own search button. Hotstar, Netflix and the other Jio presets use the same path once you turn them on in the settings screen — their stock mic button keeps working until then.
+
+The search-URL path shows a **"Searching &lt;App Name&gt;…"** card over the transition (for Prime Video, also over its profile picker) and removes it after about two seconds. Normal field typing does not show the card, so it never hides what you are typing.
+
+Prime Video restarts its "who's watching?" picker for every external search. MicBridge presses OK on the profile Prime highlights (the last one used) — it never selects a fixed profile — and covers the transition with the card.
+
 The same APK registers a handler for `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`, so apps that ship their own mic button can launch a working recogniser.
 
-## Covered apps
+## Which apps get the mic
 
-Routing is **global with a blocklist**. These keep their stock Jio behaviour and are never touched:
+Routing is global by default: every app is a target **except** the following.
 
-- the Jio/preset apps (JioTV+, Hotstar, Netflix, `com.jio.yt`, Zee5, SonyLIV, Sun NXT, Hoichoi, EPIC ON, Ultra Jhakaas, ETV Win, and everything under `com.jio.*`, `com.jiostb.*`, `com.jiotv.*`, `com.iwedia.*`),
-- Settings, SystemUI, `android`, the Jio voice app, the current launcher and MicBridge itself.
+**Core apps — never routed.** Their keys behave exactly as stock, even if they are turned on:
 
-**TizenTube** and **Prime Video** are handled through their own search deep links because neither exposes a usable accessibility tree. Prime Video restarts its "who's watching?" picker for every external search; MicBridge presses OK on the profile it highlights (the last one used) and covers the transition with a "Searching Prime Video…" card, so no selection is needed.
+- MicBridge itself and the Jio voice app,
+- the current launcher, Settings, SystemUI, `android`, `com.iwedia.*` and the old Jio launchers.
 
-Everything else gets the generic flow — **including apps that the Jio launcher has added to `Settings.Global remote_app_list`** (TVExplorer, Shevery, a sideloaded TizenTube, …). Version 1.0 blocked every package in that list, which silently disabled MicBridge for sideloaded apps pinned to the Jio home screen; 1.1 and later use the explicit list above instead.
+**Jio presets — off by default, but you can turn them on:**
+
+- everything under `com.jio.*`, `com.jiostb.*` and `com.jiotv.*` (JioTV+ and the rest),
+- Hotstar, Netflix, Zee5, Sun NXT, Hoichoi, EPIC ON, Ultra Jhakaas and ETV Win.
+
+They already have a working mic button on Jio's voice service, so MicBridge leaves them untouched until you ask for them.
+
+Everything else gets the generic flow — **including apps that the Jio launcher has added to `Settings.Global remote_app_list`** (TVExplorer, Shevery, a sideloaded TizenTube, …). Version 1.0 blocked every package in that list, which silently disabled MicBridge for sideloaded apps pinned to the Jio home screen; 1.1 and later use the lists above instead.
+
+### The settings screen
+
+MicBridge adds a remote-friendly settings app to the launcher ("MicBridge"). It has two modes:
+
+- **All apps** (default) — everything except the core apps and the Jio presets.
+- **Only selected apps** — a pure allowlist. Switching to it seeds the list from whatever is enabled at that moment, so it does not start empty.
+
+The list shows every launchable app with its icon. Press **OK** on a row to toggle it; changes take effect on the next mic press, with no service restart. Pressing OK on a core app explains that it is never used. The header shows whether the accessibility service is bound and has a button to the box's settings if it is not.
 
 ## Requirements
 
@@ -111,7 +136,7 @@ Confirm it bound:
 adb shell settings get secure enabled_accessibility_services
 adb logcat -s MicBridge
 # I MicBridge: service connected; flags=114 home=com.klevico.monet
-# I MicBridge: blocklist: Jio/preset + launcher + Settings/SystemUI; allow=
+# I MicBridge: rules: mode=all enabled=0 disabled=0; allow= block= search=
 ```
 
 The service also starts on its own after a reboot, as long as it stays in `enabled_accessibility_services`.
@@ -123,6 +148,7 @@ Press the mic key and speak. The Jio overlay appears for ~2–4 seconds (the fir
 - **SmartTube:** press mic anywhere, or press its own search orb.
 - **TizenTube:** press mic anywhere; the app opens its search results for what you said.
 - **Prime Video:** press mic on any screen; the profile picker is answered automatically (it always picks the profile Prime highlights, i.e. the last one used) and the results open.
+- **Zee5, Hotstar, Netflix:** after enabling them in the MicBridge settings screen, press mic anywhere — MicBridge opens their search screen, types the query and submits it.
 - **Nuvio and other apps:** open the app's search screen first if it does not expose a search entry point on the current screen.
 
 ### Injecting a query without speaking
@@ -141,7 +167,7 @@ Omit `--es target` to use the last foreground app, or omit `--es query` to captu
 adb logcat -s MicBridge
 ```
 
-A working press looks like this:
+A working press in an app with a text field looks like this:
 
 ```text
 mic key kc=231 scan=217
@@ -151,7 +177,18 @@ deliverToApp try=0 top=org.smarttube.stable target=org.smarttube.stable
 typed into org.smarttube.stable (StreamingTextView#lb_search_text_editor): hello
 ```
 
-If the second line says `-> blocked`, the app is on the blocklist (use `micbridge_allow`). If the last line says `search via url in <pkg>`, the app had no text field and its search deep link was opened. If it says `no text field in <pkg>` and no `search via url` line follows, the app has neither a field nor a known search URL; add one with `micbridge_search` (see below).
+An app with no text field on its home screen (Zee5, after enabling it) goes through its search screen instead:
+
+```text
+TEST target=com.zee5.aosp query=batman blocked=false
+rail: 3 icon-only entries
+opening search in com.zee5.aosp via ViewGroup#collection_header_parent
+ACTION_SET_TEXT ok=true
+typed into com.zee5.aosp (EditText#searchQuery): batman
+search submit via LinearLayout#search_button
+```
+
+If the second line says `-> blocked`, the app is excluded by the routing rules — use the MicBridge settings screen or `micbridge_allow` (see below). If the log says `search via url in <pkg>` or `search via ACTION_SEARCH in <pkg>`, the app had no text field and its own search handler was opened; `cover: Searching <label>` marks the card shown during that transition. If it ends with `no text field in <pkg>` and no search line follows, the app has neither a field, a visible search entry, nor a known search URL; open its search screen first or add one with `micbridge_search`.
 
 The same log is appended to `/sdcard/Android/data/dev.dedsec.micbridge/files/micbridge.log`.
 
@@ -184,17 +221,22 @@ The APK is signed with the bundled `micbridge.keystore` (alias `micbridge`, stor
 app/src/main/AndroidManifest.xml
 app/src/main/java/dev/dedsec/micbridge/
   MicA11yService.java     accessibility service: capture, scrape, deliver
+  Rules.java              routing model, stored selection, app list
+  SettingsActivity.java   remote-friendly allowlist / mode picker
   RecognizeActivity.java  RecognizerIntent handler for in-app mic buttons
   L.java                  logger (logcat + file)
 app/src/main/res/xml/a11y_config.xml
+app/src/main/res/drawable-*/banner.png, ic_launcher.png
 build.sh
 micbridge.keystore
 micbridge.apk
 ```
 
-## Changing the blocklist
+## Routing overrides from adb
 
-You do not need to rebuild. `micbridge_allow` is a comma/space separated list of package names that always get the generic flow, even if they are Jio/preset/launcher packages. A trailing `*` matches a prefix:
+The settings screen covers normal use. These `Settings.Global` keys are live overrides on top of it, handy for scripted setups or recovering a box without the UI. `micbridge_allow` always wins, then `micbridge_block`, then the stored selection.
+
+`micbridge_allow` is a comma/space separated list of package names that always get the generic flow, even if they are Jio/preset packages. A trailing `*` matches a prefix:
 
 ```bash
 # allow one app (e.g. a TizenTube APK that reuses com.jio.yt)
@@ -226,11 +268,11 @@ adb shell settings delete global micbridge_search
 
 Templates are tried after field delivery has failed. A template is only used if the app actually handles the link.
 
-To change the built-in list instead, edit `MicA11yService.java`:
+To change the built-in lists instead, edit `Rules.java`:
 
 ```java
-private static final String[] BLOCKED_EXACT = { ... };
-private static final String[] BLOCKED_PREFIX = { "com.iwedia.", "com.jio.", "com.jiostb.", "com.jiotv." };
+private static final String[] CORE_EXACT = { ... };   // never routed
+private static final String[] PRESET_EXACT = { ... }; // off by default, can be enabled
 ```
 
 then rebuild and reinstall.
@@ -239,11 +281,13 @@ then rebuild and reinstall.
 
 | Symptom | Cause / fix |
 | --- | --- |
-| Nothing is typed, log ends with `no text field in <pkg>; nothing typed` and no `search via url` line | The app has no text field, no visible "Search" entry point and no known search URL. Open its search screen first, or add a `micbridge_search` template. |
-| App opens its own search screen instead of filling a box | Expected for apps with no accessible text field (TizenTube, Prime Video). The search deep link is used because there is nothing to type into. |
+| Nothing is typed, log ends with `no text field in <pkg>; nothing typed` and no search line | The app has no text field, no accessible "Search" entry point and no known search URL. Open its search screen first, or add a `micbridge_search` template. |
+| App opens its own search screen instead of filling a box | Expected for apps with no accessible text field (Zee5, TizenTube, Prime Video). MicBridge clicks their search entry and types there, or uses the search deep link. |
 | Prime Video search runs as a different profile than expected | MicBridge always answers the picker on the highlighted row, which is the profile last used in Prime. Select the wanted profile once with the remote; it then stays the default. |
 | Prime Video shows "Searching Prime Video…" for a few seconds | Expected: the card covers Prime's profile picker and the load of the results page. The search runs as the highlighted profile. |
-| The mic still opens Jio's universal search, log says `voice overlay over <pkg> -> blocked` | The app is on the built-in Jio/preset/launcher blocklist. Add it to `micbridge_allow` (see above). |
+| "Searching &lt;App&gt;…" stays on screen | The card is removed after ~2 s; if it stays, the app never came back to the foreground. Press BACK once or reopen the app. |
+| The mic still opens Jio's universal search, log says `voice overlay over <pkg> -> blocked` | The app is excluded by the routing rules (a Jio preset or turned off). Enable it in the MicBridge settings screen, or add it to `micbridge_allow` (see above). |
+| Only some apps work after switching to "Only selected apps" | That mode is a pure allowlist. Tick every app you want in the list, or switch back to "All apps". |
 | The mic still opens Jio's universal search and the log shows nothing after `service connected` | 1.0 logged no routing decisions. Upgrade to 1.2, which logs `blocked` vs `capturing` for every press. |
 | Nothing happens at all | The accessibility service is not enabled/bound. Re-run the enable steps and check `adb logcat -s MicBridge`. |
 | Service disappears after a reboot | Ensure it is listed in `enabled_accessibility_services`; toggling `accessibility_enabled` off/on also rebinds it. |

@@ -161,6 +161,12 @@ adb shell am broadcast -a dev.dedsec.micbridge.TEST --es target com.nuvio.tv --e
 
 Omit `--es target` to use the last foreground app, or omit `--es query` to capture from an already-open Jio overlay.
 
+`adb shell` re-splits its arguments, so wrap the whole remote command for a multi-word query:
+
+```bash
+adb shell "am broadcast -a dev.dedsec.micbridge.TEST --es target com.zee5.aosp --es query 'the boys'"
+```
+
 ## Debugging
 
 ```bash

@@ -60,7 +60,7 @@ Leanback apps such as SmartTube have no editable field at all: their search box 
 
 Zee5 is the reference case: its home screen has no search box, only a collapsed rail whose Search item is an unlabelled icon. MicBridge clicks that item, waits for Zee5's search screen, types into its `EditText` and presses its own search button. Hotstar, Netflix and the other Jio presets use the same path once you turn them on in the settings screen — their stock mic button keeps working until then.
 
-The search-URL path shows a **"Searching &lt;App Name&gt;…"** card over the transition (for Prime Video, also over its profile picker) and removes it after about two seconds. Normal field typing does not show the card, so it never hides what you are typing.
+The search-URL path shows a **`Searching <App Name>…`** card over the transition (for Prime Video, also over its profile picker) and removes it after about two seconds. Normal field typing does not show the card, so it never hides what you are typing.
 
 Prime Video restarts its "who's watching?" picker for every external search. MicBridge presses OK on the profile Prime highlights (the last one used) — it never selects a fixed profile — and covers the transition with the card.
 
@@ -285,7 +285,7 @@ then rebuild and reinstall.
 | App opens its own search screen instead of filling a box | Expected for apps with no accessible text field (Zee5, TizenTube, Prime Video). MicBridge clicks their search entry and types there, or uses the search deep link. |
 | Prime Video search runs as a different profile than expected | MicBridge always answers the picker on the highlighted row, which is the profile last used in Prime. Select the wanted profile once with the remote; it then stays the default. |
 | Prime Video shows "Searching Prime Video…" for a few seconds | Expected: the card covers Prime's profile picker and the load of the results page. The search runs as the highlighted profile. |
-| "Searching &lt;App&gt;…" stays on screen | The card is removed after ~2 s; if it stays, the app never came back to the foreground. Press BACK once or reopen the app. |
+| `Searching <App>…` stays on screen | The card is removed after ~2 s; if it stays, the app never came back to the foreground. Press BACK once or reopen the app. |
 | The mic still opens Jio's universal search, log says `voice overlay over <pkg> -> blocked` | The app is excluded by the routing rules (a Jio preset or turned off). Enable it in the MicBridge settings screen, or add it to `micbridge_allow` (see above). |
 | Only some apps work after switching to "Only selected apps" | That mode is a pure allowlist. Tick every app you want in the list, or switch back to "All apps". |
 | The mic still opens Jio's universal search and the log shows nothing after `service connected` | 1.0 logged no routing decisions. Upgrade to 1.2, which logs `blocked` vs `capturing` for every press. |

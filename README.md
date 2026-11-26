@@ -60,9 +60,17 @@ Leanback apps such as SmartTube have no editable field at all: their search box 
 
 Zee5 is the reference case: its home screen has no search box, only a collapsed rail whose Search item is an unlabelled icon. MicBridge clicks that item, waits for Zee5's search screen, types into its `EditText` and presses its own search button. Hotstar, Netflix and the other Jio presets use the same path once you turn them on in the settings screen — their stock mic button keeps working until then.
 
-The search-URL path shows a **`Searching <App Name>…`** card over the transition (for Prime Video, also over its profile picker) and removes it after about two seconds. Normal field typing does not show the card, so it never hides what you are typing.
+### The listening card
 
-Prime Video restarts its "who's watching?" picker for every external search. MicBridge presses OK on the profile Prime highlights (the last one used) — it never selects a fixed profile — and covers the transition with the card.
+For every app that MicBridge routes, the stock Jio assistant screen is replaced by a full-screen card while you speak:
+
+- **Listening…** with an animated voice indicator and the live transcript as Jio recognises it.
+- **Searching “…”** with the final query once the text stabilises.
+- It fades as soon as the text is typed. For apps that open their own search screen or deep link it stays through the transition and fades once the search is running (about two seconds), so it does not sit over the results.
+
+The card is an accessibility overlay: it cannot be focused or touched, so it never steals the mic key, and it is not shown for Jio/preset apps that keep stock behaviour. The bars are decorative — Jio owns the microphone while listening, so MicBridge cannot read the audio level. If your Jio build only exposes the final text, you see the animation until the query appears.
+
+Prime Video restarts its "who's watching?" picker for every external search. MicBridge presses OK on the profile Prime highlights (the last one used) — it never selects a fixed profile — and keeps the card up across the picker.
 
 The same APK registers a handler for `RecognizerIntent.ACTION_RECOGNIZE_SPEECH`, so apps that ship their own mic button can launch a working recogniser.
 
@@ -91,7 +99,16 @@ MicBridge adds a remote-friendly settings app to the launcher ("MicBridge"). It 
 - **All apps** (default) — everything except the core apps and the Jio presets.
 - **Only selected apps** — a pure allowlist. Switching to it seeds the list from whatever is enabled at that moment, so it does not start empty.
 
-The list shows every launchable app with its icon. Press **OK** on a row to toggle it; changes take effect on the next mic press, with no service restart. Pressing OK on a core app explains that it is never used. The header shows whether the accessibility service is bound and has a button to the box's settings if it is not.
+The list shows every launchable app with its icon. Press **OK** on a row to toggle it; changes take effect on the next mic press, with no service restart. Pressing OK on a core app explains that it is never used.
+
+### First-run setup
+
+The first time you open MicBridge it asks for what it needs, so no adb permission commands are required:
+
+1. **Microphone** — the standard `RECORD_AUDIO` dialog is requested automatically. If it is denied, the setup card offers a retry, then opens the app's permission page.
+2. **Accessibility** — Android does not let an app enable its own accessibility service, so this one switch must be turned on by you. The setup card opens the firmware's settings directly on the MicBridge entry (falling back to its accessibility page, then to Jio Settings). Return to MicBridge and the row turns green.
+
+The card stays at the top as a status panel and can be used to reopen either setting later. After an APK update the firmware may drop the accessibility binding; opening MicBridge shows the same one-tap fix.
 
 ## Requirements
 
@@ -105,16 +122,16 @@ Download `micbridge.apk` from the [latest release](https://github.com/Lucifer753
 
 ```bash
 adb connect <STB_IP>:5555
-adb install -r -g micbridge.apk
+adb install -r micbridge.apk
 ```
 
-`-g` grants the microphone permission up front. `-r` replaces an existing copy.
+`-r` replaces an existing copy. You can still add `-g` to grant the microphone up front, but it is not required: the first-run screen asks for it. Open **MicBridge** from the launcher after installing and follow the two setup rows.
 
-Installing an APK kills the accessibility binding, so **re-enable the service after every install or update** (next section).
+Installing an APK kills the accessibility binding, so **the service must be enabled again after every install or update**. The app's setup card opens the right screen for you; the adb steps below are the manual equivalent.
 
-### Enable the accessibility service
+### Enable the accessibility service manually
 
-Keep whatever stock services are already listed — on our JHSD200 that is `com.iwedia.ledmanager/...KeyEventMonitorService` and `com.klevico.monet/...LauncherAccessibilityService`; other boxes ship different ones. Replacing the list with only MicBridge will break the remote and launcher keys.
+Normally the in-app setup card takes you here; these commands are for headless or scripted installs. Keep whatever stock services are already listed — on our JHSD200 that is `com.iwedia.ledmanager/...KeyEventMonitorService` and `com.klevico.monet/...LauncherAccessibilityService`; other boxes ship different ones. Replacing the list with only MicBridge will break the remote and launcher keys.
 
 ```bash
 CUR=$(adb shell settings get secure enabled_accessibility_services | tr -d '\r')
@@ -143,7 +160,7 @@ The service also starts on its own after a reboot, as long as it stays in `enabl
 
 ## Use
 
-Press the mic key and speak. The Jio overlay appears for ~2–4 seconds (the firmware always starts it; hiding it would need root), then closes and the text lands in the app.
+Press the mic key and speak. The firmware still starts the Jio assistant, but for routed apps MicBridge covers it with the listening card, shows the recognised words, then closes it and delivers the text.
 
 - **SmartTube:** press mic anywhere, or press its own search orb.
 - **TizenTube:** press mic anywhere; the app opens its search results for what you said.
@@ -167,6 +184,12 @@ Omit `--es target` to use the last foreground app, or omit `--es query` to captu
 adb shell "am broadcast -a dev.dedsec.micbridge.TEST --es target com.zee5.aosp --es query 'the boys'"
 ```
 
+To preview the card without speaking, add `--ez demo true`. It plays the listening → searching → fade sequence and types nothing:
+
+```bash
+adb shell "am broadcast -a dev.dedsec.micbridge.TEST --es target org.smarttube.stable --es query 'hello' --ez demo true"
+```
+
 ## Debugging
 
 ```bash
@@ -178,7 +201,9 @@ A working press in an app with a text field looks like this:
 ```text
 mic key kc=231 scan=217
 voice overlay over org.smarttube.stable -> capturing
+overlay: listening over SmartTube
 captured query: "hello"
+overlay: searching "hello" in SmartTube
 deliverToApp try=0 top=org.smarttube.stable target=org.smarttube.stable
 typed into org.smarttube.stable (StreamingTextView#lb_search_text_editor): hello
 ```
@@ -194,7 +219,7 @@ typed into com.zee5.aosp (EditText#searchQuery): batman
 search submit via LinearLayout#search_button
 ```
 
-If the second line says `-> blocked`, the app is excluded by the routing rules — use the MicBridge settings screen or `micbridge_allow` (see below). If the log says `search via url in <pkg>` or `search via ACTION_SEARCH in <pkg>`, the app had no text field and its own search handler was opened; `cover: Searching <label>` marks the card shown during that transition. If it ends with `no text field in <pkg>` and no search line follows, the app has neither a field, a visible search entry, nor a known search URL; open its search screen first or add one with `micbridge_search`.
+If the second line says `-> blocked`, the app is excluded by the routing rules — use the MicBridge settings screen or `micbridge_allow` (see below). `overlay: listening over <label>` and `overlay: searching "<query>" in <label>` mark the animated card. If the log says `search via url in <pkg>` or `search via ACTION_SEARCH in <pkg>`, the app had no text field and its own search handler was opened. If it ends with `no text field in <pkg>` and no search line follows, the app has neither a field, a visible search entry, nor a known search URL; open its search screen first or add one with `micbridge_search`.
 
 The same log is appended to `/sdcard/Android/data/dev.dedsec.micbridge/files/micbridge.log`.
 
@@ -227,8 +252,9 @@ The APK is signed with the bundled `micbridge.keystore` (alias `micbridge`, stor
 app/src/main/AndroidManifest.xml
 app/src/main/java/dev/dedsec/micbridge/
   MicA11yService.java     accessibility service: capture, scrape, deliver
+  SearchOverlay.java      animated listening/searching card + voice bars
   Rules.java              routing model, stored selection, app list
-  SettingsActivity.java   remote-friendly allowlist / mode picker
+  SettingsActivity.java   first-run setup + allowlist / mode picker
   RecognizeActivity.java  RecognizerIntent handler for in-app mic buttons
   L.java                  logger (logcat + file)
 app/src/main/res/xml/a11y_config.xml
@@ -290,8 +316,12 @@ then rebuild and reinstall.
 | Nothing is typed, log ends with `no text field in <pkg>; nothing typed` and no search line | The app has no text field, no accessible "Search" entry point and no known search URL. Open its search screen first, or add a `micbridge_search` template. |
 | App opens its own search screen instead of filling a box | Expected for apps with no accessible text field (Zee5, TizenTube, Prime Video). MicBridge clicks their search entry and types there, or uses the search deep link. |
 | Prime Video search runs as a different profile than expected | MicBridge always answers the picker on the highlighted row, which is the profile last used in Prime. Select the wanted profile once with the remote; it then stays the default. |
-| Prime Video shows "Searching Prime Video…" for a few seconds | Expected: the card covers Prime's profile picker and the load of the results page. The search runs as the highlighted profile. |
-| `Searching <App>…` stays on screen | The card is removed after ~2 s; if it stays, the app never came back to the foreground. Press BACK once or reopen the app. |
+| Prime Video shows the listening card for a few seconds | Expected: the card covers Prime's profile picker and the load of the results page. The search runs as the highlighted profile. |
+| The listening/searching card stays on screen | It fades as soon as the text is delivered; a slow retry can keep it up briefly. Press BACK once or reopen the app to clear it. |
+| The microphone dialog never appears | It was denied before, or the box remembers the choice. Press **Grant** on the setup card; if Android no longer shows the dialog, that button opens MicBridge's app permission page. |
+| **Turn on** opens Jio Settings instead of the Accessibility page | This firmware has no standalone accessibility activity, so the fallback is Jio Settings. Choose **General → Accessibility → MicBridge**. |
+| The setup says Accessibility is off although the service is enabled | The service may have crashed or been killed. Toggle accessibility off/on in the settings, or use the manual adb steps above. |
+| No card appears but the mic still works | The app is not routed (Jio preset or disabled), so the stock Jio overlay is shown. Enable it in the settings screen. |
 | The mic still opens Jio's universal search, log says `voice overlay over <pkg> -> blocked` | The app is excluded by the routing rules (a Jio preset or turned off). Enable it in the MicBridge settings screen, or add it to `micbridge_allow` (see above). |
 | Only some apps work after switching to "Only selected apps" | That mode is a pure allowlist. Tick every app you want in the list, or switch back to "All apps". |
 | The mic still opens Jio's universal search and the log shows nothing after `service connected` | 1.0 logged no routing decisions. Upgrade to 1.2, which logs `blocked` vs `capturing` for every press. |
@@ -313,14 +343,14 @@ The stock mic path is untouched, so Jio apps keep working exactly as before.
 
 ## Permissions and privacy
 
-- `RECORD_AUDIO` — used only by `RecognizeActivity`, which forwards the result of the Jio recogniser to the calling app.
+- `RECORD_AUDIO` — requested by the first-run card; used only by `RecognizeActivity`, which forwards the result of the Jio recogniser to the calling app.
 - `QUERY_ALL_PACKAGES` — lets the accessibility service resolve the foreground package name on Android 11.
-- Accessibility — observes window changes and the Jio overlay's view tree to read the recognised text.
+- Accessibility — enabled once from the setup card (Android forbids apps from toggling it themselves). It observes window changes and the Jio overlay's view tree to read the recognised text.
 - **No `INTERNET` permission.** MicBridge cannot upload anything; the text never leaves the box.
 
 ## Limitations
 
-- The Jio voice overlay still flashes on every press.
+- The Jio assistant still launches underneath on every press. MicBridge covers it on routed apps, so a brief flash is possible before the card appears; Jio/preset apps keep the stock overlay.
 - Requires the stock Jio voice assistant; removing or disabling it breaks the capture step.
 - Text delivery only — no cursor positioning, selection, or password fields.
 - Specific to the Jio firmware that hard-launches `com.android.app.jio.voiceassist`. Other vendors' boxes do not need it.

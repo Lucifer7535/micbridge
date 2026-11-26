@@ -11,7 +11,6 @@ import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.app.SearchManager;
 import android.graphics.Bitmap;
-import android.graphics.PixelFormat;
 import android.hardware.HardwareBuffer;
 import android.net.Uri;
 import android.os.Build;
@@ -20,15 +19,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
 import android.view.Display;
-import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.View;
-import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
-import android.widget.LinearLayout;
-import android.widget.TextView;
 
 import java.net.URLEncoder;
 import java.util.ArrayList;
@@ -144,6 +138,25 @@ public class MicA11yService extends AccessibilityService {
                     String q = i.getStringExtra("query");
                     L.f(MicA11yService.this, "TEST target=" + t
                             + " query=" + q + " blocked=" + isBlocked(t));
+                    if (i.getBooleanExtra("demo", false)) {
+                        // Visual test hook: listening -> searching -> fade,
+                        // without needing the Jio overlay or a spoken query.
+                        final String ft = t;
+                        final String fq = q;
+                        showListening(ft);
+                        if (q != null && !q.isEmpty()) {
+                            showTranscript(q);
+                            h.postDelayed(new Runnable() {
+                                @Override
+                                public void run() { showSearchingCard(ft, fq); }
+                            }, 1400);
+                            h.postDelayed(new Runnable() {
+                                @Override
+                                public void run() { hideOverlay(); }
+                            }, 4200);
+                        }
+                        return;
+                    }
                     if (q != null && !q.isEmpty()) deliver(t, q);
                     else startCapture(t);
                 }
@@ -231,6 +244,7 @@ public class MicA11yService extends AccessibilityService {
                     String s = cs.toString().trim();
                     if (plausibleQuery(s)) {
                         updateQueryFromEvent(s);
+                        showTranscript(s);
                         return;
                     }
                 }
@@ -238,7 +252,10 @@ public class MicA11yService extends AccessibilityService {
             AccessibilityNodeInfo src = event.getSource();
             if (src != null) {
                 String s = extractNodeText(src);
-                if (s != null && plausibleQuery(s)) updateQueryFromEvent(s);
+                if (s != null && plausibleQuery(s)) {
+                    updateQueryFromEvent(s);
+                    showTranscript(s);
+                }
             }
         } catch (Throwable ignored) {}
     }
@@ -315,7 +332,11 @@ public class MicA11yService extends AccessibilityService {
     }
 
     @Override
-    public void onInterrupt() {}
+    public void onInterrupt() {
+        // Never leave the full-screen card stranded if the binding drops.
+        destroyOverlay();
+        busy = false;
+    }
 
     // ---- blocklist -----------------------------------------------------
 
@@ -409,12 +430,15 @@ public class MicA11yService extends AccessibilityService {
         searchIntentTried = false;
         overlaySeen = false;
         overlayAbsentCount = 0;
+        currentQuery = "";
+        showListening(target);
         poll(target, 0);
     }
 
     private void poll(final String target, final int tick) {
         if (tick > 90) {          // ~27 s
             L.f(this, "capture timeout");
+            overlayMissed();
             busy = false;
             return;
         }
@@ -432,6 +456,7 @@ public class MicA11yService extends AccessibilityService {
             String q = readQuery();
             if (q != null) {
                 updateQueryFromEvent(q);
+                showTranscript(q);
             }
             if (lastQuery != null) {
                 // The result screen carries a banner/title; prefer that, and
@@ -440,6 +465,7 @@ public class MicA11yService extends AccessibilityService {
                         || hasId(JIO_VA + ":id/title");
                 if ((finalUi && stableCount >= 1) || stableCount >= 2) {
                     L.f(this, "captured query: \"" + lastQuery + "\" (finalUi=" + finalUi + ")");
+                    showSearchingCard(target, lastQuery);
                     deliver(target, lastQuery);
                     return;
                 }
@@ -450,9 +476,11 @@ public class MicA11yService extends AccessibilityService {
             if (overlayAbsentCount >= 2) {
                 if (lastQuery != null && plausibleQuery(lastQuery)) {
                     L.f(this, "overlay closed with query: \"" + lastQuery + "\" -> delivering");
+                    showSearchingCard(target, lastQuery);
                     deliver(target, lastQuery);
                 } else if (tick > 6) {   // ~900 ms, allow a late event
                     L.f(this, "overlay closed before a query appeared (top=" + top + ")");
+                    overlayMissed();
                     busy = false;
                 } else {
                     h.postDelayed(new Runnable() {
@@ -464,6 +492,7 @@ public class MicA11yService extends AccessibilityService {
             }
         } else if (tick > 26) {      // ~4 s, overlay never showed up
             L.f(this, "overlay never appeared after mic press");
+            hideOverlay();
             busy = false;
             return;
         }
@@ -586,6 +615,7 @@ public class MicA11yService extends AccessibilityService {
     private void deliver(final String target, final String text) {
         // Each delivery gets its own shot at opening search, including
         // repeated debug broadcasts in one service lifetime.
+        currentQuery = text == null ? "" : text;
         searchClicks = 0;
         searchTried = false;
         searchIntentTried = false;
@@ -609,6 +639,7 @@ public class MicA11yService extends AccessibilityService {
         }, 500);
             } else {
                 L.f(this, "could not dismiss Jio overlay");
+                hideOverlay();
                 busy = false;
             }
             return;
@@ -622,6 +653,7 @@ public class MicA11yService extends AccessibilityService {
         }, 500);
             } else {
                 L.f(this, "target never came to front (" + target + ")");
+                hideOverlay();
                 busy = false;
             }
             return;
@@ -637,6 +669,7 @@ public class MicA11yService extends AccessibilityService {
                 // A plain EditText usually needs its own Search button or an
                 // IME action; Leanback fields search as they are filled.
                 if (!lean) submitSearch(target, root, field);
+                hideOverlay();
                 busy = false;
             } else if (tries < 5) {
                 L.f(this, "could not type into " + nodeName(field) + "; retrying");
@@ -646,6 +679,7 @@ public class MicA11yService extends AccessibilityService {
         }, 450);
             } else {
                 L.f(this, "could not type into " + nodeName(field));
+                hideOverlay();
                 busy = false;
             }
             return;
@@ -693,6 +727,7 @@ public class MicA11yService extends AccessibilityService {
             }
             L.f(this, "no text field in " + target
                     + " (focus=" + nodeName(focus) + "); nothing typed");
+            hideOverlay();
             busy = false;
         }
     }
@@ -1000,7 +1035,7 @@ public class MicA11yService extends AccessibilityService {
             // Cover the launch itself and the app's loading screen. The card
             // is opaque, so it has to be removed before the screenshot-based
             // Prime detector runs.
-            showCover(pkg);
+            showSearchingCard(pkg, text);
             startActivity(i);
             L.f(this, "search via url in " + pkg + ": " + url);
             if (PRIME_PKG.equals(pkg)) {
@@ -1019,7 +1054,7 @@ public class MicA11yService extends AccessibilityService {
                         h.postDelayed(new Runnable() {
                             @Override
                             public void run() {
-                                hideCover();
+                                hideOverlayNow();
                                 primeSelectProfile(pkg, 0);
                             }
                         }, 1700);
@@ -1028,12 +1063,12 @@ public class MicA11yService extends AccessibilityService {
             } else {
                 h.postDelayed(new Runnable() {
                     @Override
-                    public void run() { hideCover(); }
+                    public void run() { hideOverlay(); }
                 }, 2000);
             }
             return true;
         } catch (Throwable t) {
-            hideCover();
+            hideOverlay();
             L.f(this, "search url failed for " + pkg + ": " + t);
             return false;
         }
@@ -1054,78 +1089,112 @@ public class MicA11yService extends AccessibilityService {
                 L.f(this, "no ACTION_SEARCH handler in " + pkg);
                 return false;
             }
-            showCover(pkg);
+            showSearchingCard(pkg, text);
             startActivity(i);
             L.f(this, "search via ACTION_SEARCH in " + pkg);
             h.postDelayed(new Runnable() {
                 @Override
-                public void run() { hideCover(); }
+                public void run() { hideOverlay(); }
             }, 2000);
             return true;
         } catch (Throwable t) {
-            hideCover();
+            hideOverlay();
             L.f(this, "ACTION_SEARCH failed for " + pkg + ": " + t);
             return false;
         }
     }
 
-    // ---- "Searching <app>..." card -------------------------------------
+    // ---- listening / searching overlay ---------------------------------
 
     private static final int PRIME_ATTEMPTS = 20;
     private int primePresses;
 
-    /** Full-screen card shown while a search link loads, so the app switch,
-     *  Prime's profile picker and the results load are not exposed. */
-    private View cover;
-    private WindowManager coverWm;
+    private SearchOverlay overlay;
+    private String currentQuery = "";
+    private String lastOverlayQuery = "";
 
-    private void showCover(String pkg) {
-        if (cover != null) return;
+    private SearchOverlay overlay() {
+        if (overlay == null) overlay = new SearchOverlay(this);
+        return overlay;
+    }
+
+    /** Shows the listening card over the Jio assistant. */
+    private void showListening(String pkg) {
+        if (isBlocked(pkg)) return;
         try {
-            if (coverWm == null) {
-                coverWm = (WindowManager) getSystemService(WINDOW_SERVICE);
-            }
-            LinearLayout box = new LinearLayout(this);
-            box.setOrientation(LinearLayout.VERTICAL);
-            box.setGravity(Gravity.CENTER);
-            box.setBackgroundColor(0xFF0B0F14);
-
-            TextView label = new TextView(this);
-            label.setText("Searching " + appLabel(pkg) + "\u2026");
-            label.setTextColor(0xFFE6E8EB);
-            label.setTextSize(24);
-            label.setGravity(Gravity.CENTER);
-            box.addView(label, new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT));
-
-            WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-                    PixelFormat.TRANSLUCENT);
-            coverWm.addView(box, lp);
-            cover = box;
-            L.f(this, "cover: Searching " + appLabel(pkg));
+            String label = appLabel(pkg);
+            overlay().showListening(pkg, label);
+            lastOverlayQuery = "";
+            L.f(this, "overlay: listening over " + label);
         } catch (Throwable t) {
-            L.f(this, "cover failed: " + t);
-            cover = null;
+            L.f(this, "overlay listening failed: " + t);
         }
     }
 
-    private void hideCover() {
-        if (cover == null) return;
+    /** Feeds the live recognised text into the listening card. */
+    private void showTranscript(String text) {
+        if (overlay == null || text == null) return;
         try {
-            coverWm.removeViewImmediate(cover);
+            overlay.setTranscript(text);
         } catch (Throwable ignored) {
         }
-        cover = null;
     }
 
-    /** User-facing name for the "Searching ..." card. */
+    /** Switches to the timeout/error state (auto-fades). */
+    private void overlayMissed() {
+        if (overlay != null && overlay.isShowing()) {
+            try {
+                overlay.showMissed();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** Shows the searching card with the final query. */
+    private void showSearchingCard(String pkg, String query) {
+        String q = query == null ? "" : query;
+        try {
+            overlay().showSearching(pkg, appLabel(pkg), q);
+            if (!q.equals(lastOverlayQuery)) {
+                lastOverlayQuery = q;
+                L.f(this, "overlay: searching \"" + q + "\" in " + appLabel(pkg));
+            }
+        } catch (Throwable t) {
+            L.f(this, "overlay searching failed: " + t);
+        }
+    }
+
+    private void hideOverlay() {
+        if (overlay == null) return;
+        try {
+            overlay.dismiss();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** Removes the card at once, for screenshot-based checks. */
+    private void hideOverlayNow() {
+        if (overlay == null) return;
+        try {
+            overlay.hideImmediately();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private boolean overlayShowing() {
+        return overlay != null && overlay.isShowing();
+    }
+
+    private void destroyOverlay() {
+        if (overlay == null) return;
+        try {
+            overlay.destroy();
+        } catch (Throwable ignored) {
+        }
+        overlay = null;
+    }
+
+    /** User-facing name for the overlay. */
     private String appLabel(String pkg) {
         try {
             ApplicationInfo ai = getPackageManager().getApplicationInfo(pkg, 0);
@@ -1137,7 +1206,7 @@ public class MicA11yService extends AccessibilityService {
 
     @Override
     public void onDestroy() {
-        hideCover();
+        destroyOverlay();
         super.onDestroy();
     }
 
@@ -1157,12 +1226,12 @@ public class MicA11yService extends AccessibilityService {
         if (Build.VERSION.SDK_INT < 30) return;
         if (attempt > PRIME_ATTEMPTS || primePresses >= 3) {
             L.f(this, "prime: profile picker not detected");
-            hideCover();
+            hideOverlay();
             return;
         }
-        // While the cover is up it is the front window, so do not use
+        // While the card is up it is the front window, so do not use
         // activeAppPackage() to decide whether Prime is still in front.
-        if (cover == null && !pkg.equals(activeAppPackage())) {
+        if (!overlayShowing() && !pkg.equals(activeAppPackage())) {
             h.postDelayed(new Runnable() {
             @Override
             public void run() { primeSelectProfile(pkg, attempt + 1); }
@@ -1197,19 +1266,19 @@ public class MicA11yService extends AccessibilityService {
                                     primePresses++;
                                     L.f(MicA11yService.this, "prime: picked highlighted profile ("
                                             + primePresses + ")");
-                                    showCover(pkg);
+                                    showSearchingCard(pkg, currentQuery);
                                     // Let the engine load the queued search
-                                    // behind the cover, then look again.
+                                    // behind the card, then look again.
                                     h.postDelayed(new Runnable() {
             @Override
-            public void run() { hideCover(); primeSelectProfile(pkg, attempt + 1); }
+            public void run() { hideOverlayNow(); primeSelectProfile(pkg, attempt + 1); }
         }, 1800);
                                     return;
                                 }
                             } else if (primePresses > 0) {
                                 // A profile was picked and the picker is gone:
                                 // Prime is already running the queued search.
-                                hideCover();
+                                hideOverlay();
                                 L.f(MicA11yService.this, "prime: picker gone, search running");
                                 return;
                             }

@@ -1,18 +1,29 @@
 package dev.dedsec.micbridge;
 
+import android.Manifest;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.app.Activity;
+import android.content.ComponentName;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.accessibility.AccessibilityManager;
 import android.widget.AdapterView;
 import android.widget.BaseAdapter;
 import android.widget.Button;
@@ -36,19 +47,30 @@ public class SettingsActivity extends Activity {
 
     private static final int ID_MODE_ALL = 1001;
     private static final int ID_MODE_SELECTED = 1002;
+    private static final int REQ_MIC = 2001;
+
+    private static final String PREF_SETUP_SEEN = "setup_seen";
+    private static final String PREF_OPENED_A11Y = "opened_a11y";
 
     private static final int BG = 0xFF0B0F14;
     private static final int CARD = 0xFF141A22;
     private static final int TEXT = 0xFFE6E8EB;
     private static final int MUTED = 0xFF9AA4B2;
     private static final int ACCENT = 0xFF7FB2FF;
+    private static final int GREEN = 0xFF6EE7A8;
+    private static final int AMBER = 0xFFF59E0B;
 
     private RadioGroup modes;
     private TextView summary;
-    private TextView status;
+    private TextView setupTitle;
+    private TextView micState;
+    private TextView a11yState;
+    private Button micButton;
+    private Button a11yButton;
     private ListView list;
     private Adapter adapter;
     private boolean loading = true;
+    private boolean micDenied;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -67,9 +89,7 @@ public class SettingsActivity extends Activity {
         root.addView(text("Choose which apps receive the remote's microphone key.",
                 16, MUTED), lp(0, 0, 0, 10));
 
-        status = text("", 14, MUTED);
-        root.addView(status);
-        root.addView(statusButton(), lp(0, 6, 0, 18));
+        root.addView(setupCard(), lp(0, 0, 0, 16));
 
         root.addView(text("Use the mic in", 15, MUTED), lp(0, 0, 0, 4));
 
@@ -136,12 +156,13 @@ public class SettingsActivity extends Activity {
         });
 
         reload();
+        firstRunSetup();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        updateStatus();
+        updateSetup();
         if (adapter != null) reload();
     }
 
@@ -176,46 +197,274 @@ public class SettingsActivity extends Activity {
                 Toast.LENGTH_SHORT).show();
     }
 
-    private void updateStatus() {
-        boolean on = serviceRunning();
-        status.setText(on ? "Accessibility service: running"
-                : "Accessibility service: off \u2014 MicBridge cannot receive the mic key");
-        status.setTextColor(on ? 0xFF6EE7A8 : 0xFFF59E0B);
+    // ---- first-run setup -----------------------------------------------
+
+    private View setupCard() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(20), dp(15), dp(20), dp(13));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(CARD);
+        bg.setCornerRadius(dp(18));
+        bg.setStroke(Math.max(1, dp(1)), 0xFF1E2630);
+        card.setBackground(bg);
+
+        setupTitle = text("SETUP", 12, MUTED);
+        setupTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        setupTitle.setLetterSpacing(0.14f);
+        card.addView(setupTitle);
+
+        micState = text("", 13, MUTED);
+        micButton = smallButton("Grant");
+        micButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                requestMicOrSettings();
+            }
+        });
+        LinearLayout micRow = setupRow("Microphone", micState, micButton);
+        card.addView(micRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        a11yState = text("", 13, MUTED);
+        a11yButton = smallButton("Turn on");
+        a11yButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openAccessibilitySettings();
+            }
+        });
+        LinearLayout a11yRow = setupRow("Accessibility", a11yState, a11yButton);
+        card.addView(a11yRow, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        card.addView(text("Both are needed. The mic dialog appears automatically; "
+                + "accessibility needs its switch turned on once.",
+                12, MUTED), lp(0, 7, 0, 0));
+        return card;
     }
 
-    private boolean serviceRunning() {
+    private LinearLayout setupRow(String name, TextView state, Button action) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(8), 0, 0);
+        row.addView(text(name, 17, TEXT), new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(state, lp(12, 0, 12, 0));
+        row.addView(action);
+        return row;
+    }
+
+    private Button smallButton(String label) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setAllCaps(false);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        b.setMinWidth(dp(104));
+        b.setPadding(dp(16), 0, dp(16), 0);
+        return b;
+    }
+
+    /** On the very first open after install, start the setup automatically. */
+    private void firstRunSetup() {
+        if (getSharedPreferences(Rules.PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_SETUP_SEEN, false)) {
+            return;
+        }
+        getSharedPreferences(Rules.PREFS, MODE_PRIVATE).edit()
+                .putBoolean(PREF_SETUP_SEEN, true).apply();
+        list.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                if (!hasMic()) {
+                    requestMic();
+                } else if (!a11yEnabled()) {
+                    openA11yOnce();
+                }
+            }
+        }, 600);
+    }
+
+    private void requestMicOrSettings() {
+        if (hasMic()) return;
+        if (micDenied && Build.VERSION.SDK_INT >= 23
+                && !shouldShowRequestPermissionRationale(Manifest.permission.RECORD_AUDIO)) {
+            openAppSettings();
+            return;
+        }
+        requestMic();
+    }
+
+    private void requestMic() {
+        if (Build.VERSION.SDK_INT < 23) {
+            updateSetup();
+            return;
+        }
         try {
-            String s = Settings.Secure.getString(getContentResolver(),
-                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
-            return s != null && s.contains(getPackageName());
+            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
+        } catch (Throwable t) {
+            Toast.makeText(this, "Could not request the microphone",
+                    Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                           int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_MIC) return;
+        if (hasMic()) {
+            micDenied = false;
+            updateSetup();
+            // Continue the guided setup without another tap.
+            openA11yOnce();
+        } else {
+            micDenied = true;
+            updateSetup();
+            Toast.makeText(this, "Microphone access is required for the mic key",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private boolean hasMic() {
+        if (Build.VERSION.SDK_INT < 23) return true;
+        try {
+            return checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                    == PackageManager.PERMISSION_GRANTED;
         } catch (Throwable t) {
             return false;
         }
     }
 
-    private Button statusButton() {
-        Button b = new Button(this);
-        b.setText("Open accessibility settings");
-        b.setAllCaps(false);
-        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        b.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                // This firmware has no standalone accessibility activity; its
-                // Jio Settings main page has Accessibility under "General".
-                Intent i = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                if (i.resolveActivity(getPackageManager()) == null) {
-                    i = new Intent(Settings.ACTION_SETTINGS);
-                }
-                try {
-                    startActivity(i);
-                } catch (Throwable t) {
-                    Toast.makeText(SettingsActivity.this,
-                            "No settings screen found", Toast.LENGTH_SHORT).show();
+    private void updateSetup() {
+        boolean mic = hasMic();
+        boolean a11y = a11yEnabled();
+
+        if (micState != null) {
+            micState.setText(mic ? "Granted" : "Not granted");
+            micState.setTextColor(mic ? GREEN : AMBER);
+        }
+        if (micButton != null) {
+            micButton.setVisibility(mic ? View.GONE : View.VISIBLE);
+        }
+        if (a11yState != null) {
+            a11yState.setText(a11y ? "On" : "Off");
+            a11yState.setTextColor(a11y ? GREEN : AMBER);
+        }
+        if (a11yButton != null) {
+            a11yButton.setText(a11y ? "Settings" : "Turn on");
+        }
+        if (setupTitle != null) {
+            setupTitle.setText(mic && a11y ? "SETUP COMPLETE" : "SETUP");
+            setupTitle.setTextColor(mic && a11y ? GREEN : MUTED);
+        }
+    }
+
+    private boolean a11yEnabled() {
+        try {
+            AccessibilityManager am =
+                    (AccessibilityManager) getSystemService(ACCESSIBILITY_SERVICE);
+            if (am != null) {
+                List<AccessibilityServiceInfo> infos =
+                        am.getEnabledAccessibilityServiceList(
+                                AccessibilityServiceInfo.FEEDBACK_ALL_MASK);
+                if (infos != null) {
+                    for (AccessibilityServiceInfo i : infos) {
+                        ResolveInfo ri = i == null ? null : i.getResolveInfo();
+                        if (ri != null && ri.serviceInfo != null
+                                && getPackageName().equals(ri.serviceInfo.packageName)) {
+                            return true;
+                        }
+                    }
                 }
             }
-        });
-        return b;
+        } catch (Throwable ignored) {
+        }
+        try {
+            String s = Settings.Secure.getString(getContentResolver(),
+                    Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
+            return s != null && s.contains(getPackageName() + "/");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** Opens accessibility settings once, on the first guided run. */
+    private void openA11yOnce() {
+        if (a11yEnabled()) return;
+        if (getSharedPreferences(Rules.PREFS, MODE_PRIVATE)
+                .getBoolean(PREF_OPENED_A11Y, false)) {
+            return;
+        }
+        getSharedPreferences(Rules.PREFS, MODE_PRIVATE).edit()
+                .putBoolean(PREF_OPENED_A11Y, true).apply();
+        openAccessibilitySettings();
+    }
+
+    private void openAccessibilitySettings() {
+        Toast.makeText(this, "Turn on MicBridge, then press BACK",
+                Toast.LENGTH_LONG).show();
+
+        // AOSP Settings can open the service detail page directly.
+        Intent details = new Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS");
+        details.putExtra("android.intent.extra.COMPONENT_NAME",
+                new ComponentName(this, MicA11yService.class));
+        if (startResolved(details)) return;
+
+        if (startResolved(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))) return;
+
+        // Some Jio firmware hides the accessibility page under a vendor
+        // activity. Find it in whichever app handles ACTION_SETTINGS.
+        Intent discovered = findAccessibilityActivity();
+        if (discovered != null && startResolved(discovered)) return;
+
+        if (startResolved(new Intent(Settings.ACTION_SETTINGS))) return;
+
+        Toast.makeText(this, "No settings screen found", Toast.LENGTH_SHORT).show();
+    }
+
+    private boolean startResolved(Intent i) {
+        try {
+            if (i.resolveActivity(getPackageManager()) == null) return false;
+            startActivity(i);
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private Intent findAccessibilityActivity() {
+        try {
+            Intent main = new Intent(Settings.ACTION_SETTINGS);
+            ResolveInfo ri = getPackageManager().resolveActivity(main, 0);
+            if (ri == null || ri.activityInfo == null) return null;
+            String pkg = ri.activityInfo.packageName;
+            PackageInfo pi = getPackageManager().getPackageInfo(
+                    pkg, PackageManager.GET_ACTIVITIES);
+            if (pi == null || pi.activities == null) return null;
+            for (ActivityInfo ai : pi.activities) {
+                if (ai == null || ai.name == null) continue;
+                if (ai.name.toLowerCase(java.util.Locale.US).contains("accessib")) {
+                    Intent i = new Intent();
+                    i.setComponent(new ComponentName(pkg, ai.name));
+                    return i;
+                }
+            }
+        } catch (Throwable t) {
+            L.f(this, "find accessibility activity: " + t);
+        }
+        return null;
+    }
+
+    private void openAppSettings() {
+        try {
+            startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (Throwable t) {
+            Toast.makeText(this, "Open Settings > Apps > MicBridge",
+                    Toast.LENGTH_LONG).show();
+        }
     }
 
     private RadioButton radio(String label, int id) {

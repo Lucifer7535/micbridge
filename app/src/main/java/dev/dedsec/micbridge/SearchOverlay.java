@@ -312,7 +312,10 @@ final class SearchOverlay {
 
     private void enter() {
         if (root == null) return;
-        root.setAlpha(0f);
+        // Appear at full opacity at once: the card is shown on the mic key
+        // press to cover the Jio window, and a fade-in would let the stock
+        // screen show through for ~200 ms.
+        root.setAlpha(1f);
         if (card != null) {
             card.setScaleX(0.96f);
             card.setScaleY(0.96f);
@@ -322,9 +325,6 @@ final class SearchOverlay {
                     .setInterpolator(new DecelerateInterpolator())
                     .start();
         }
-        root.animate().alpha(1f).setDuration(180)
-                .setInterpolator(new LinearInterpolator())
-                .start();
     }
 
     private int dp(int v) {

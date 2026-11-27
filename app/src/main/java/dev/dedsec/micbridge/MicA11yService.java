@@ -91,6 +91,9 @@ public class MicA11yService extends AccessibilityService {
     private long keyAppAt;
 
     private boolean busy;
+    /** Card shown on the key-down itself, before the Jio window appears. */
+    private boolean earlyCard;
+    private String earlyTarget = "";
     private long lastTrigger;
     private long lastBlockedLog;
     private String lastQuery;
@@ -211,6 +214,7 @@ public class MicA11yService extends AccessibilityService {
 
         boolean blocked = isBlocked(target);
         if (blocked) {
+            clearEarlyCard();
             if (now - lastBlockedLog > 3000) {
                 lastBlockedLog = now;
                 L.f(this, "voice overlay over " + target
@@ -305,6 +309,19 @@ public class MicA11yService extends AccessibilityService {
             L.f(this, "mic key kc=" + kc + " scan=" + event.getScanCode()
                     + " app=" + keyApp);
 
+            // Cover the Jio window as early as possible: the firmware shows
+            // it on the same key press, and waiting for its window event
+            // leaves it visible for a moment. The accessibility overlay sits
+            // above app windows, so showing it now also covers the launch.
+            if (!busy && keyApp != null && !keyApp.isEmpty()
+                    && !JIO_VA.equals(keyApp)
+                    && !getPackageName().equals(keyApp)
+                    && !isBlocked(keyApp)) {
+                earlyCard = true;
+                earlyTarget = keyApp;
+                showListening(keyApp);
+            }
+
             // Do not depend on the system delivering a window-state change.
             watchForOverlay(keyApp, 0);
         }
@@ -316,14 +333,26 @@ public class MicA11yService extends AccessibilityService {
      * Jio overlay is dropped (seen on some launchers/firmware).
      */
     private void watchForOverlay(final String keyTarget, final int attempt) {
-        if (attempt > 8) return;
+        if (attempt > 8) {
+            // No Jio window: the key did not start the assistant (dead mic
+            // link, or the firmware swallowed it). Do not leave the early
+            // card on screen.
+            if (earlyCard && !busy) {
+                earlyCard = false;
+                earlyTarget = "";
+                hideOverlay();
+            }
+            return;
+        }
         h.postDelayed(new Runnable() {
             @Override
             public void run() {
                 if (busy) return;
                 if (jioOverlayPresent()) {
                     long now = System.currentTimeMillis();
-                    if (now - lastTrigger <= 1000) return;
+                    if (now - lastTrigger <= 1000) {
+                        return;         // a capture already ran
+                    }
 
                     String target = keyTarget;
                     if (target == null || target.isEmpty()
@@ -331,9 +360,13 @@ public class MicA11yService extends AccessibilityService {
                         target = lastApp;
                     }
                     if (target == null || target.isEmpty()) target = activeAppPackage();
-                    if (target == null || target.isEmpty()) return;
+                    if (target == null || target.isEmpty()) {
+                        clearEarlyCard();
+                        return;
+                    }
 
                     if (isBlocked(target)) {
+                        clearEarlyCard();
                         if (now - lastBlockedLog > 3000) {
                             lastBlockedLog = now;
                             L.f(MicA11yService.this, "voice overlay over " + target
@@ -351,11 +384,21 @@ public class MicA11yService extends AccessibilityService {
         }, attempt == 0 ? 150 : 250);
     }
 
+    /** Drops a card shown on key-down when that press turns out to be ignored. */
+    private void clearEarlyCard() {
+        if (!earlyCard) return;
+        earlyCard = false;
+        earlyTarget = "";
+        if (!busy) hideOverlay();
+    }
+
     @Override
     public void onInterrupt() {
         // Never leave the full-screen card stranded if the binding drops.
         destroyOverlay();
         busy = false;
+        earlyCard = false;
+        earlyTarget = "";
     }
 
     // ---- blocklist -----------------------------------------------------
@@ -441,6 +484,12 @@ public class MicA11yService extends AccessibilityService {
     // ---- query capture -------------------------------------------------
 
     private void startCapture(String target) {
+        // The listening card may already be on screen from the key-down.
+        // Rebuilding it would re-run the entrance animation and flash.
+        boolean reuseCard = earlyCard && overlayShowing()
+                && earlyTarget != null && earlyTarget.equals(target);
+        earlyCard = false;
+        earlyTarget = "";
         busy = true;
         lastTrigger = System.currentTimeMillis();
         lastQuery = null;
@@ -451,7 +500,11 @@ public class MicA11yService extends AccessibilityService {
         overlaySeen = false;
         overlayAbsentCount = 0;
         currentQuery = "";
-        showListening(target);
+        if (reuseCard) {
+            L.f(this, "overlay: listening over " + appLabel(target) + " (early)");
+        } else {
+            showListening(target);
+        }
         poll(target, 0);
     }
 

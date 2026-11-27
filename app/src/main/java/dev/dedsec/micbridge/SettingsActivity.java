@@ -65,6 +65,7 @@ public class SettingsActivity extends Activity {
     private TextView setupTitle;
     private TextView micState;
     private TextView a11yState;
+    private TextView a11yHint;
     private Button micButton;
     private Button a11yButton;
     private ListView list;
@@ -238,6 +239,12 @@ public class SettingsActivity extends Activity {
         card.addView(a11yRow, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        // Android TV settings has no direct accessibility page on this
+        // firmware, so keep the path visible after the toast goes away.
+        a11yHint = text("In Settings: Device Preferences \u2192 Accessibility", 12, AMBER);
+        a11yHint.setPadding(0, dp(3), 0, 0);
+        card.addView(a11yHint);
+
         card.addView(text("Both are needed. The mic dialog appears automatically; "
                 + "accessibility needs its switch turned on once.",
                 12, MUTED), lp(0, 7, 0, 0));
@@ -355,6 +362,9 @@ public class SettingsActivity extends Activity {
         if (a11yButton != null) {
             a11yButton.setText(a11y ? "Settings" : "Turn on");
         }
+        if (a11yHint != null) {
+            a11yHint.setVisibility(a11y ? View.GONE : View.VISIBLE);
+        }
         if (setupTitle != null) {
             setupTitle.setText(mic && a11y ? "SETUP COMPLETE" : "SETUP");
             setupTitle.setTextColor(mic && a11y ? GREEN : MUTED);
@@ -409,28 +419,36 @@ public class SettingsActivity extends Activity {
         Intent details = new Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS");
         details.putExtra("android.intent.extra.COMPONENT_NAME",
                 new ComponentName(this, MicA11yService.class));
-        if (startResolved(details)) {
-            toast(direct);
+        if (startWithHint(details, direct)) {
             return;
         }
 
-        if (startResolved(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))) {
-            toast(direct);
+        if (startWithHint(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS),
+                direct)) {
             return;
         }
 
-        // Some Jio firmware hides the accessibility page under a vendor
-        // activity. Find it in whichever app handles ACTION_SETTINGS.
+        // Android TV settings is a single activity: Accessibility lives one
+        // level down, under Device Preferences. The vendor settings app on
+        // this firmware has no accessibility page at all, so name the AOSP
+        // TV settings explicitly instead of letting ACTION_SETTINGS land in
+        // the vendor app.
+        Intent tv = new Intent();
+        tv.setComponent(new ComponentName("com.android.tv.settings",
+                "com.android.tv.settings.MainSettings"));
+        if (startWithHint(tv,
+                "Device Preferences \u2192 Accessibility: turn on MicBridge, then BACK")) {
+            return;
+        }
+
+        // Older/other firmware may still expose a dedicated activity.
         Intent discovered = findAccessibilityActivity();
-        if (discovered != null && startResolved(discovered)) {
-            toast(direct);
+        if (discovered != null && startWithHint(discovered, direct)) {
             return;
         }
 
-        // This firmware has no accessibility activity at all: its main
-        // settings page carries Accessibility under General.
-        if (startResolved(new Intent(Settings.ACTION_SETTINGS))) {
-            toast("General → Accessibility: turn on MicBridge, then BACK");
+        if (startWithHint(new Intent(Settings.ACTION_SETTINGS),
+                "Settings \u2192 Accessibility: turn on MicBridge, then BACK")) {
             return;
         }
 
@@ -441,9 +459,14 @@ public class SettingsActivity extends Activity {
         Toast.makeText(this, text, Toast.LENGTH_LONG).show();
     }
 
-    private boolean startResolved(Intent i) {
+    /**
+     * Shows the hint first: this firmware cancels a toast raised after the
+     * activity leaves the foreground.
+     */
+    private boolean startWithHint(Intent i, String hint) {
         try {
             if (i.resolveActivity(getPackageManager()) == null) return false;
+            if (hint != null) toast(hint);
             startActivity(i);
             return true;
         } catch (Throwable t) {
@@ -452,24 +475,27 @@ public class SettingsActivity extends Activity {
     }
 
     private Intent findAccessibilityActivity() {
-        try {
-            Intent main = new Intent(Settings.ACTION_SETTINGS);
-            ResolveInfo ri = getPackageManager().resolveActivity(main, 0);
-            if (ri == null || ri.activityInfo == null) return null;
-            String pkg = ri.activityInfo.packageName;
-            PackageInfo pi = getPackageManager().getPackageInfo(
-                    pkg, PackageManager.GET_ACTIVITIES);
-            if (pi == null || pi.activities == null) return null;
-            for (ActivityInfo ai : pi.activities) {
-                if (ai == null || ai.name == null) continue;
-                if (ai.name.toLowerCase(java.util.Locale.US).contains("accessib")) {
-                    Intent i = new Intent();
-                    i.setComponent(new ComponentName(pkg, ai.name));
-                    return i;
+        // Only look at the AOSP settings packages. Resolving ACTION_SETTINGS
+        // would pick the vendor app, which never has this page.
+        String[] packages = {"com.android.tv.settings", "com.android.settings"};
+        for (String pkg : packages) {
+            try {
+                PackageInfo pi = getPackageManager().getPackageInfo(
+                        pkg, PackageManager.GET_ACTIVITIES);
+                if (pi == null || pi.activities == null) continue;
+                for (ActivityInfo ai : pi.activities) {
+                    if (ai == null || ai.name == null) continue;
+                    String n = ai.name.toLowerCase(java.util.Locale.US);
+                    // The TV settings "oemlink" aliases finish themselves on
+                    // this firmware's flavor, so they are not a destination.
+                    if (n.contains("accessib") && !n.contains("oemlink")) {
+                        Intent i = new Intent();
+                        i.setComponent(new ComponentName(pkg, ai.name));
+                        return i;
+                    }
                 }
+            } catch (Throwable ignored) {
             }
-        } catch (Throwable t) {
-            L.f(this, "find accessibility activity: " + t);
         }
         return null;
     }

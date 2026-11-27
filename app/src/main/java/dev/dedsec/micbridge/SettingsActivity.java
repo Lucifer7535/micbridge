@@ -403,25 +403,42 @@ public class SettingsActivity extends Activity {
     }
 
     private void openAccessibilitySettings() {
-        Toast.makeText(this, "Turn on MicBridge, then press BACK",
-                Toast.LENGTH_LONG).show();
+        String direct = "Turn on MicBridge, then press BACK";
 
         // AOSP Settings can open the service detail page directly.
         Intent details = new Intent("android.settings.ACCESSIBILITY_DETAILS_SETTINGS");
         details.putExtra("android.intent.extra.COMPONENT_NAME",
                 new ComponentName(this, MicA11yService.class));
-        if (startResolved(details)) return;
+        if (startResolved(details)) {
+            toast(direct);
+            return;
+        }
 
-        if (startResolved(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))) return;
+        if (startResolved(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))) {
+            toast(direct);
+            return;
+        }
 
         // Some Jio firmware hides the accessibility page under a vendor
         // activity. Find it in whichever app handles ACTION_SETTINGS.
         Intent discovered = findAccessibilityActivity();
-        if (discovered != null && startResolved(discovered)) return;
+        if (discovered != null && startResolved(discovered)) {
+            toast(direct);
+            return;
+        }
 
-        if (startResolved(new Intent(Settings.ACTION_SETTINGS))) return;
+        // This firmware has no accessibility activity at all: its main
+        // settings page carries Accessibility under General.
+        if (startResolved(new Intent(Settings.ACTION_SETTINGS))) {
+            toast("General → Accessibility: turn on MicBridge, then BACK");
+            return;
+        }
 
         Toast.makeText(this, "No settings screen found", Toast.LENGTH_SHORT).show();
+    }
+
+    private void toast(String text) {
+        Toast.makeText(this, text, Toast.LENGTH_LONG).show();
     }
 
     private boolean startResolved(Intent i) {

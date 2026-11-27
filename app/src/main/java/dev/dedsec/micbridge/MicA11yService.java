@@ -237,6 +237,11 @@ public class MicA11yService extends AccessibilityService {
 
     private void checkJioEventForQuery(AccessibilityEvent event) {
         try {
+            AccessibilityNodeInfo src = event.getSource();
+            // Only the recogniser's own text view is speech. Other events from
+            // the Jio window carry the window title, the "Try Saying" cards and
+            // their icon descriptions ("image"), which are not queries.
+            if (src == null || !isVoiceTextNode(src)) return;
             List<CharSequence> texts = event.getText();
             if (texts != null) {
                 for (CharSequence cs : texts) {
@@ -249,15 +254,30 @@ public class MicA11yService extends AccessibilityService {
                     }
                 }
             }
-            AccessibilityNodeInfo src = event.getSource();
-            if (src != null) {
-                String s = extractNodeText(src);
-                if (s != null && plausibleQuery(s)) {
-                    updateQueryFromEvent(s);
-                    showTranscript(s);
-                }
+            String s = extractNodeText(src);
+            if (s != null && plausibleQuery(s)) {
+                updateQueryFromEvent(s);
+                showTranscript(s);
             }
         } catch (Throwable ignored) {}
+    }
+
+    /** True when the node is (or sits inside) one of the query text views. */
+    private boolean isVoiceTextNode(AccessibilityNodeInfo node) {
+        try {
+            AccessibilityNodeInfo n = node;
+            for (int i = 0; i < 4 && n != null; i++) {
+                CharSequence id = n.getViewIdResourceName();
+                if (id != null) {
+                    String s = id.toString();
+                    for (String q : ID_QUERY) {
+                        if (q.equals(s)) return true;
+                    }
+                }
+                n = n.getParent();
+            }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     private void updateQueryFromEvent(String q) {
@@ -580,7 +600,10 @@ public class MicA11yService extends AccessibilityService {
         if (s == null) return false;
         String t = s.trim();
         if (t.length() < 2) return false;
-        String l = t.toLowerCase(Locale.US);
+        // Jio mixes straight and curly apostrophes ("Couldn’t catch ...").
+        String l = t.toLowerCase(Locale.US)
+                .replace('\u2019', '\'')
+                .replace('\u2018', '\'');
 
         // Placeholders and dots that appear while the recogniser is starting.
         if (l.equals("…") || l.equals("...") || l.equals("..")
@@ -588,6 +611,13 @@ public class MicA11yService extends AccessibilityService {
             return false;
         }
         if (l.contains("listening")) return false;
+
+        // The voice app's own window title arrives in window-state events;
+        // it is never something the user said.
+        if (l.equals("voice assistant")
+                || l.equals(jioLabel().toLowerCase(Locale.US))) {
+            return false;
+        }
 
         // Jio's overlay prints spoken instructions in English and Hindi; they
         // must never be mistaken for the query.
@@ -603,7 +633,9 @@ public class MicA11yService extends AccessibilityService {
         if (l.equals("on") || l.equals("off") || l.equals("try again")) return false;
         String[] bad = {"sorry", "didn't", "did not", "not able", "no result",
                 "something went wrong", "could not", "couldn't", "try saying",
-                "network", "please try"};
+                "network", "please try", "catch what", "retry or see",
+                "no speech", "didn't hear", "hi there", "how can i help",
+                "say something", "please say"};
         for (String b : bad) {
             if (l.contains(b)) return false;
         }
@@ -1202,6 +1234,15 @@ public class MicA11yService extends AccessibilityService {
             if (l != null && l.length() > 0) return l.toString();
         } catch (Throwable ignored) {}
         return pkg;
+    }
+
+    private String jioLabel;
+
+    /** Cached label of the Jio voice app; its window title must not be read
+     *  back as a spoken query. */
+    private String jioLabel() {
+        if (jioLabel == null) jioLabel = appLabel(JIO_VA);
+        return jioLabel;
     }
 
     @Override
